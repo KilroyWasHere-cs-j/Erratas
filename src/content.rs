@@ -1,4 +1,3 @@
-//! Content-side checks: simple pattern/word-list matching for PII and
-//! profanity — no NLP, just regex/word-list lookups.
+// TODO: Scan PII patterns for regex matches.
 
-
+// TODO: Scan profanity patterns for word-list matches.
