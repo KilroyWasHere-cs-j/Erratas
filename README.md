@@ -49,3 +49,24 @@ the lib via the package's own name) — no workspace split needed yet.
 ```bash
 cargo run -- <file>
 ```
+
+## TODO
+
+**Core checks** (each is a `todo!()` right now):
+- [ ] `malware::scan_signatures` — known-bad hash/signature lookup; needs a maintained signature database/source
+- [ ] `malware::scan_yara_rules` — integrate the `yara-rust` crate (bindings to libyara), load a compiled ruleset
+- [ ] `malware::check_archive_structure` — compression-ratio and nesting-depth checks on archive headers, before decompressing
+- [ ] `content::scan_pii` — regex patterns for SSN, credit card, email, phone
+- [ ] `content::scan_profanity` — word-list matching
+- [ ] `lib::audit_file` — read the file once and wire it up to `malware::scan` + `content::scan`
+
+**Plumbing:**
+- [ ] Pick and pin exact crate versions (`yara-rust`, `regex`, a zip-parsing crate) — needs a typosquatting check before anything goes in `Cargo.toml`
+- [ ] `main.rs` — output the `AuditReport` as JSON on stdout instead of `{:#?}`, so other tools can parse it over a subprocess call
+- [ ] Decide whether a daemon mode (warm process behind a socket) is worth adding on top of the CLI, or if per-call startup cost is fine
+- [ ] Tests for each check, once they exist
+- [ ] CI (build + test on push)
+
+**Open decisions:**
+- [ ] Where this plugs into Dewey — on the synchronous upload path (blocks the request) or the async post-upload pipeline (`idAndSort`) — not decided yet
+- [ ] GitHub remote — this repo is currently local-only
