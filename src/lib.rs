@@ -4,8 +4,11 @@
 //! malicious (`malware`) and whether its content trips any policy checks
 //! (`content`). Meant to be called as a CLI from any language/tool, not
 //! linked in as a library — see main.rs for the entry point.
-use std::fs::File;
-use std::io::Read;
+use std::fs;
+use content::profanity;
+use malware::magick_bytes;
+
+use error::ErratasError;
 
 pub mod malware;
 pub mod content;
@@ -15,13 +18,12 @@ pub fn scan(path: &str) {
     let file = load_file(path);
 }
 
-fn load_file(path: &str) {
-    let mut f = File::open(path).unwrap();
-    let mut contents = String::new();
-    f.read_to_string(&mut contents).unwrap();
-    if contents.len() < 2 {
-        println!("File is too small to be scanned.");
-        return;
-    }
-    println!("With text:\n{}", contents);
+fn load_file(path: &str) -> Result<(), ErratasError> {
+    // TODO: Sanitize file path.
+    let file_content = fs::read(path)?;
+
+    println!("Scanning for malware...");
+    magick_bytes(&file_content);
+    profanity();
+    Ok(())
 }
