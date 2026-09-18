@@ -5,20 +5,17 @@ use crate::error::ErratasError;
 use crate::types::{ArchiveSubType, ErratasContentFlag, ErratasResult, ExecutableSubType, RealFileType, DocumentSubType, ImageSubType, AudioSubType, VideoSubType, UnknownSubType, RealFileSubType};
 
 pub fn identify_type(contents: &[u8]) -> ErratasResult {
-    match check_elf(contents) {
-        RealFileType::LinuxExecutable => {
-            let file_sub_type = if is_elf_shared_object(contents) {
-                ExecutableSubType::SO
-            } else {
-                ExecutableSubType::ELF
-            };
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file_type: RealFileType::LinuxExecutable,
-                file_sub_type: RealFileSubType::Executable(file_sub_type)
-            }
-        },
-        _ => {}
+    if let Some(offset) = check_elf(contents) {
+        let file_sub_type = if is_elf_shared_object(contents, offset) {
+            ExecutableSubType::SO
+        } else {
+            ExecutableSubType::ELF
+        };
+        return ErratasResult {
+            flags: vec![ErratasContentFlag::BandedFileType],
+            file_type: RealFileType::LinuxExecutable,
+            file_sub_type: RealFileSubType::Executable(file_sub_type)
+        }
     }
 
     match check_winexe(contents) {
@@ -328,26 +325,44 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
     };
 }
 
-fn check_elf(contents: &[u8]) -> RealFileType {
-    if contents.len() >= 4 && contents[0] == 0x7F && contents[1] == 0x45 && contents[2] == 0x4C && contents[3] == 0x46 {
-        return RealFileType::LinuxExecutable;
+// Returns the byte offset where the ELF magic was found, so callers (like
+// is_elf_shared_object) can read the rest of the header relative to where
+// it actually starts -- not always 0, once a fallback match is involved.
+fn check_elf(contents: &[u8]) -> Option<usize> {
+    let elf_magic = [0x7F, 0x45, 0x4C, 0x46];
+    if contents.len() >= 4 && contents[0..4] == elf_magic {
+        return Some(0);
     }
-    return RealFileType::Unknown;
+
+    // contents.len() < 4 has no valid window to scan; guard first so the
+    // range below can't underflow.
+    if contents.len() < 4 {
+        return None;
+    }
+    for i in 0..=(contents.len() - 4) {
+        if contents[i..i + 4] == elf_magic {
+            return Some(i);
+        }
+    }
+    None
 }
 
 // e_type (offset 16, 2 bytes) tells ELF binaries and shared objects apart --
 // ET_DYN (3) is a .so, ET_EXEC (2) is a regular executable. Byte order for
 // that field follows EI_DATA at offset 5 (1 = little-endian, 2 = big-endian),
-// since ELF (unlike PE) isn't always little-endian.
+// since ELF (unlike PE) isn't always little-endian. `base` is where the ELF
+// magic itself was found (see check_elf) -- every other header field is
+// read relative to it, not a hardcoded 0, so a shifted/carved ELF header
+// still gets its e_type read from the right place.
 const ET_DYN: u16 = 3;
 
-fn is_elf_shared_object(contents: &[u8]) -> bool {
-    if contents.len() < 18 {
+fn is_elf_shared_object(contents: &[u8], base: usize) -> bool {
+    if contents.len() < base + 18 {
         return false;
     }
-    let e_type = match contents[5] {
-        2 => u16::from_be_bytes([contents[16], contents[17]]),
-        _ => u16::from_le_bytes([contents[16], contents[17]]),
+    let e_type = match contents[base + 5] {
+        2 => u16::from_be_bytes([contents[base + 16], contents[base + 17]]),
+        _ => u16::from_le_bytes([contents[base + 16], contents[base + 17]]),
     };
     e_type == ET_DYN
 }
@@ -392,7 +407,7 @@ fn scan_for_at_offset(contents: &[u8], anchor: &[u8], gap: usize, tag: &[u8]) ->
     false
 }
 
-const MACHO_MAGICS: [[u8; 4]; 6] = [
+const MACHO_MAGICKS: [[u8; 4]; 6] = [
     [0xFE, 0xED, 0xFA, 0xCE], [0xCE, 0xFA, 0xED, 0xFE],
     [0xFE, 0xED, 0xFA, 0xCF], [0xCF, 0xFA, 0xED, 0xFE],
     [0xCA, 0xFE, 0xBA, 0xBE], [0xBE, 0xBA, 0xFE, 0xCA],
@@ -412,7 +427,7 @@ fn check_macho(contents: &[u8]) -> RealFileType {
             _ => {}
         }
     }
-    for magic in MACHO_MAGICS.iter() {
+    for magic in MACHO_MAGICKS.iter() {
         if scan_for(contents, magic) {
             return RealFileType::MacExecutable;
         }
@@ -901,23 +916,50 @@ mod tests {
 
     #[test]
     fn elf_executable_is_not_a_shared_object() {
-        assert!(!is_elf_shared_object(&elf_header(2, false))); // ET_EXEC
+        assert!(!is_elf_shared_object(&elf_header(2, false), 0)); // ET_EXEC
     }
 
     #[test]
     fn elf_shared_object_little_endian() {
-        assert!(is_elf_shared_object(&elf_header(3, false))); // ET_DYN
+        assert!(is_elf_shared_object(&elf_header(3, false), 0)); // ET_DYN
     }
 
     #[test]
     fn elf_shared_object_big_endian() {
-        assert!(is_elf_shared_object(&elf_header(3, true))); // ET_DYN
+        assert!(is_elf_shared_object(&elf_header(3, true), 0)); // ET_DYN
     }
 
     #[test]
     fn contents_too_short_to_hold_e_type_are_not_a_shared_object() {
         let contents = elf_header(3, false);
-        assert!(!is_elf_shared_object(&contents[..17])); // one byte short of e_type
+        assert!(!is_elf_shared_object(&contents[..17], 0)); // one byte short of e_type
+    }
+
+    #[test]
+    fn check_elf_does_not_panic_on_files_under_4_bytes() {
+        assert_eq!(check_elf(&[]), None);
+        assert_eq!(check_elf(&[0x7F, 0x45]), None);
+    }
+
+    #[test]
+    fn check_elf_finds_shifted_magic_via_fallback_scan() {
+        let mut contents = vec![0x90; 32];
+        contents.extend_from_slice(&elf_header(2, false));
+        assert_eq!(check_elf(&contents), Some(32));
+    }
+
+    #[test]
+    fn identify_type_reports_shared_object_when_shifted() {
+        // Same ET_DYN header as identify_type_reports_shared_object, just
+        // pushed behind 32 bytes of filler -- this is what check_elf's
+        // fallback scan plus is_elf_shared_object's offset threading needs
+        // to get right together for a shifted .so to still classify as SO
+        // instead of misreading e_type from the wrong bytes.
+        let mut contents = vec![0x90; 32];
+        contents.extend_from_slice(&elf_header(3, false));
+        let result = identify_type(&contents);
+        assert_eq!(result.file_type, RealFileType::LinuxExecutable);
+        assert_eq!(result.file_sub_type, RealFileSubType::Executable(ExecutableSubType::SO));
     }
 
     #[test]
