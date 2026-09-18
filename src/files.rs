@@ -436,6 +436,9 @@ fn check_macho(contents: &[u8]) -> RealFileType {
 }
 
 fn check_winexe(contents: &[u8]) -> Result<RealFileType, ErratasError> {
+    if contents.len() < 64 {
+        return Ok(RealFileType::Unknown);
+    }
     let mut pe = false;
     let mut mz = false;
 
