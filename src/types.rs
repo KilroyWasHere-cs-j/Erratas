@@ -13,6 +13,11 @@ pub enum ErratasContentFlag {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum UnknownSubType {
+    Unknown
+}
+
+#[derive(Debug, PartialEq)]
 pub enum RealFileType {
     Image,
     Video,
@@ -25,41 +30,77 @@ pub enum RealFileType {
     Unknown
 }
 
-
 #[derive(Debug, PartialEq)]
-pub enum RealFileSubType {
+pub enum ImageSubType {
     PNG,
     JPEG,
     GIF,
+    BMP,
+    WEBP,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum VideoSubType {
+    MP4,
+    WEBM,
+    AVI,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum AudioSubType {
+    WAV,
+    FLAC,
+    OGG,
+    MP3,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DocumentSubType {
+    DOC,
+    DOCX,
+    XLS,
+    XLSX,
+    PPT,
+    PPTX,
+    PDF,
+    OOXML,
+    OLECFB,
+    CHM,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ArchiveSubType {
+    ZIP,
+    TAR,
+    RAR,
+    SEVENZ,
+    CAB,
+    DMG,
+    ISO,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ExecutableSubType {
     ELF,
     PE,
     MachO,
     DLL,
     SO,
     LNK,
-    DMG,
-    ISO,
-    PDF,
-    OLECFB,
-    CHM,
-    BMP,
-    WEBP,
-    WAV,
-    FLAC,
-    OGG,
-    MP3,
-    MP4,
-    WEBM,
-    AVI,
-    RAR,
-    ZIP,
-    SevenZ,
-    CAB,
-    TAR,
-    OOXML,
-    Unknown
 }
 
+#[derive(Debug, PartialEq)]
+pub enum RealFileSubType {
+    Unknown(UnknownSubType),
+    Image(ImageSubType),
+    Video(VideoSubType),
+    Audio(AudioSubType),
+    Document(DocumentSubType),
+    Archive(ArchiveSubType),
+    Executable(ExecutableSubType),
+}
+
+#[derive(Debug)]
 pub struct ErratasResult {
     pub flags: Vec<ErratasContentFlag>,
     pub file_type: RealFileType,
