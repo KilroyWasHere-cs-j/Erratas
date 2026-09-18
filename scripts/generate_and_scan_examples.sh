@@ -7,6 +7,18 @@
 # These are minimal byte-pattern stubs (same idea as the resources/test_*
 # fixtures already in the repo) -- just enough to trip each check_*
 # function, not real openable documents/media/executables.
+#
+# Usage: ./generate_and_scan_examples.sh [normal|shifted]
+#   normal  (default) -- magic bytes at their expected offset.
+#   shifted            -- every format's magic bytes pushed back by a
+#                          block of 0x90 filler, the same trick the
+#                          hand-made resources/shifted_*/strange_offset.exe
+#                          fixtures already use. This defeats each check_*
+#                          function's fast, fixed-offset path and forces it
+#                          onto its scan_for()/scan_for_at_offset() fallback
+#                          -- formats with a working fallback still detect
+#                          correctly (green), formats without one reveal
+#                          themselves by going Unknown (red).
 
 set -euo pipefail
 
@@ -15,29 +27,67 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESOURCES_DIR="$REPO_ROOT/resources"
 mkdir -p "$RESOURCES_DIR"
 
+MODE="${1:-normal}"
+case "$MODE" in
+    normal)
+        FILE_TAG="example"
+        PREFIX=0
+        ;;
+    shifted)
+        FILE_TAG="shifted_example"
+        PREFIX=192
+        ;;
+    *)
+        echo "Usage: $0 [normal|shifted]" >&2
+        exit 1
+        ;;
+esac
+echo "Mode: $MODE (files tagged '$FILE_TAG', $PREFIX-byte prefix)"
+
+# resource_file <path using the literal "example" prefix>
+# Lets every write_padded/poke call below just say ".../example.foo"
+# regardless of mode -- swaps in "shifted_example" instead when that mode
+# is selected, so normal and shifted fixtures never collide on disk.
+resource_file() {
+    echo "${1/example/$FILE_TAG}"
+}
+
 # write_padded <file> <min_size> [byte byte ...]
 # Writes the given hex bytes (space-separated, no "0x" prefix) to the
 # start of a file, then zero-pads it out to at least <min_size> bytes.
+# In "shifted" mode, leads with PREFIX bytes of 0x90 filler first, so the
+# magic doesn't start at offset 0 -- this is what exercises each check_*'s
+# scan_for fallback instead of its fast, fixed-offset check.
 write_padded() {
-    local file="$1" min_size="$2"
+    local file min_size
+    file="$(resource_file "$1")"
+    min_size="$2"
     shift 2
     : > "$file"
+    if [ "$PREFIX" -gt 0 ]; then
+        dd if=/dev/zero bs=1 count="$PREFIX" 2>/dev/null | tr '\0' '\220' >> "$file"
+    fi
     for b in "$@"; do
         printf "\\x$b" >> "$file"
     done
     local size
     size=$(wc -c < "$file" | tr -d ' ')
-    if [ "$size" -lt "$min_size" ]; then
-        dd if=/dev/zero bs=1 count=$((min_size - size)) >> "$file" 2>/dev/null
+    local target=$((min_size + PREFIX))
+    if [ "$size" -lt "$target" ]; then
+        dd if=/dev/zero bs=1 count=$((target - size)) >> "$file" 2>/dev/null
     fi
 }
 
 # poke <file> <offset> <byte byte ...>
 # Overwrites bytes at the given offset in an existing file without
 # truncating the rest of it -- used for magic bytes that don't sit at
-# offset 0 (e.g. the "ftyp"/"WAVE"/"CD001" family).
+# offset 0 (e.g. the "ftyp"/"WAVE"/"CD001" family). The offset shifts by
+# the same PREFIX as write_padded, so a format's own internal layout
+# (e.g. WAVE sitting 8 bytes after RIFF) stays intact either way.
 poke() {
-    local file="$1" offset="$2"
+    local file offset
+    file="$(resource_file "$1")"
+    offset=$(( $2 + PREFIX ))
     shift 2
     local tmp
     tmp="$(mktemp)"
@@ -113,7 +163,7 @@ write_padded "$RESOURCES_DIR/example.chm" 64 49 54 53 46
 # Synthetic OOXML: a ZIP signature plus the literal "[Content_Types].xml"
 # name check_ooxml scans for -- not a real, openable .docx.
 write_padded "$RESOURCES_DIR/example.docx" 64 50 4b 03 04
-printf '[Content_Types].xml' >> "$RESOURCES_DIR/example.docx"
+printf '[Content_Types].xml' >> "$(resource_file "$RESOURCES_DIR/example.docx")"
 
 # --- images ----------------------------------------------------------------
 
@@ -153,8 +203,25 @@ echo
 echo "Running each example through erratas:"
 echo
 
-for f in "$RESOURCES_DIR"/example*; do
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+RESET='\033[0m'
+
+for f in "$RESOURCES_DIR/$FILE_TAG"*; do
     echo "== $(basename "$f") =="
-    "$BIN" "$f" | grep -E "^(Detected type|Error|Scanning for)" || true
+    output="$("$BIN" "$f")"
+
+    # "Worked" means a real type came back with no error line -- an Unknown
+    # result (e.g. "Unknown (Unknown(Unknown))") or a printed "Error:" both
+    # count as "didn't work".
+    if echo "$output" | grep -qE "^Error:|^Detected type: Unknown \("; then
+        color="$RED"
+    else
+        color="$GREEN"
+    fi
+
+    while IFS= read -r line; do
+        printf "%b%s%b\n" "$color" "$line" "$RESET"
+    done <<< "$(echo "$output" | grep -E "^(Detected type|Error|Scanning for)")"
     echo
 done

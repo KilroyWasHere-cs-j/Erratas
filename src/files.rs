@@ -2,20 +2,20 @@
 // magic-byte checks below if that doesn't resolve it.
 
 use crate::error::ErratasError;
-use crate::types::{ErratasResult, RealFileType, RealFileSubType, ErratasContentFlag};
+use crate::types::{ArchiveSubType, ErratasContentFlag, ErratasResult, ExecutableSubType, RealFileType, DocumentSubType, ImageSubType, AudioSubType, VideoSubType, UnknownSubType, RealFileSubType};
 
 pub fn identify_type(contents: &[u8]) -> ErratasResult {
     match check_elf(contents) {
         RealFileType::LinuxExecutable => {
             let file_sub_type = if is_elf_shared_object(contents) {
-                RealFileSubType::SO
+                ExecutableSubType::SO
             } else {
-                RealFileSubType::ELF
+                ExecutableSubType::ELF
             };
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::LinuxExecutable,
-                file_sub_type
+                file_sub_type: RealFileSubType::Executable(file_sub_type)
             }
         },
         _ => {}
@@ -26,7 +26,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::WinExecutable,
-                file_sub_type: RealFileSubType::PE
+                file_sub_type: RealFileSubType::Executable(ExecutableSubType::PE)
             }
         },
         Ok(_) => {},
@@ -40,7 +40,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::WinExecutable,
-                file_sub_type: RealFileSubType::DLL
+                file_sub_type: RealFileSubType::Executable(ExecutableSubType::DLL)
             }
         },
         _ => {}
@@ -51,7 +51,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::WinExecutable,
-                file_sub_type: RealFileSubType::LNK
+                file_sub_type: RealFileSubType::Executable(ExecutableSubType::LNK)
             }
         },
         _ => {}
@@ -62,7 +62,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::MacExecutable,
-                file_sub_type: RealFileSubType::MachO
+                file_sub_type: RealFileSubType::Executable(ExecutableSubType::MachO)
             }
         },
         _ => {}
@@ -73,7 +73,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::DMG
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::DMG)
             }
         },
         _ => {}
@@ -87,7 +87,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Document,
-                file_sub_type: RealFileSubType::OOXML
+                file_sub_type: RealFileSubType::Document(DocumentSubType::OOXML)
             }
         },
         _ => {}
@@ -98,7 +98,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::ZIP
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::ZIP)
             }
         },
         _ => {}
@@ -109,7 +109,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::RAR
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::RAR)
             }
         },
         _ => {}
@@ -119,7 +119,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::SevenZ
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::SEVENZ)
             } 
         },
         _ => {}
@@ -130,7 +130,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::CAB
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::CAB)
             }
         },
         _ => {}
@@ -141,7 +141,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::TAR
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::TAR)
             }
         },
         _ => {}
@@ -152,14 +152,14 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Archive,
-                file_sub_type: RealFileSubType::ISO
+                file_sub_type: RealFileSubType::Archive(ArchiveSubType::ISO)
             }
         },
         RealFileType::WinExecutable => {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::WinExecutable,
-                file_sub_type: RealFileSubType::PE
+                file_sub_type: RealFileSubType::Executable(ExecutableSubType::PE)
             }
         },
         _ => {}
@@ -170,7 +170,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Document,
-                file_sub_type: RealFileSubType::PDF
+                file_sub_type: RealFileSubType::Document(DocumentSubType::PDF)
             }
         },
         _ => {}
@@ -181,7 +181,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Document,
-                file_sub_type: RealFileSubType::OLECFB
+                file_sub_type: RealFileSubType::Document(DocumentSubType::OLECFB)
             }
         },
         _ => {}
@@ -192,7 +192,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Document,
-                file_sub_type: RealFileSubType::CHM
+                file_sub_type: RealFileSubType::Document(DocumentSubType::CHM)
             }
         },
         _ => {}
@@ -203,7 +203,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Image,
-                file_sub_type: RealFileSubType::PNG
+                file_sub_type: RealFileSubType::Image(ImageSubType::PNG)
             }
         },
         _ => {}
@@ -213,7 +213,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Image,
-                file_sub_type: RealFileSubType::JPEG
+                file_sub_type: RealFileSubType::Image(ImageSubType::JPEG)
             }
         },
         _ => {}
@@ -223,7 +223,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Image,
-                file_sub_type: RealFileSubType::GIF
+                file_sub_type: RealFileSubType::Image(ImageSubType::GIF)
             }
         },
         _ => {}
@@ -233,7 +233,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Image,
-                file_sub_type: RealFileSubType::BMP
+                file_sub_type: RealFileSubType::Image(ImageSubType::BMP)
             }
         },
         _ => {}
@@ -243,7 +243,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Image,
-                file_sub_type: RealFileSubType::WEBP
+                file_sub_type: RealFileSubType::Image(ImageSubType::WEBP)
             }
         },
         _ => {}
@@ -254,7 +254,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Audio,
-                file_sub_type: RealFileSubType::WAV
+                file_sub_type: RealFileSubType::Audio(AudioSubType::WAV)
             }
         },
         _ => {}
@@ -264,7 +264,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Audio,
-                file_sub_type: RealFileSubType::FLAC
+                file_sub_type: RealFileSubType::Audio(AudioSubType::FLAC)
             }
         },
         _ => {}
@@ -274,7 +274,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Audio,
-                file_sub_type: RealFileSubType::OGG
+                file_sub_type: RealFileSubType::Audio(AudioSubType::OGG)
             }
         },
         _ => {}
@@ -284,7 +284,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Audio,
-                file_sub_type: RealFileSubType::MP3
+                file_sub_type: RealFileSubType::Audio(AudioSubType::MP3)
             }
         },
         _ => {}
@@ -295,7 +295,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Video,
-                file_sub_type: RealFileSubType::MP4
+                file_sub_type: RealFileSubType::Video(VideoSubType::MP4)
             }
         },
         _ => {}
@@ -305,7 +305,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Video,
-                file_sub_type: RealFileSubType::WEBM
+                file_sub_type: RealFileSubType::Video(VideoSubType::WEBM)
             }
         },
         _ => {}
@@ -315,7 +315,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
             return ErratasResult {
                 flags: vec![ErratasContentFlag::BandedFileType],
                 file_type: RealFileType::Video,
-                file_sub_type: RealFileSubType::AVI
+                file_sub_type: RealFileSubType::Video(VideoSubType::AVI)
             }
         },
         _ => {}
@@ -324,7 +324,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
     return ErratasResult {
         flags: vec![ErratasContentFlag::Unknown],
         file_type: RealFileType::Unknown,
-        file_sub_type: RealFileSubType::Unknown
+        file_sub_type: RealFileSubType::Unknown(UnknownSubType::Unknown)
     };
 }
 
@@ -924,13 +924,13 @@ mod tests {
     fn identify_type_reports_elf_executable() {
         let result = identify_type(&elf_header(2, false));
         assert_eq!(result.file_type, RealFileType::LinuxExecutable);
-        assert_eq!(result.file_sub_type, RealFileSubType::ELF);
+        assert_eq!(result.file_sub_type, RealFileSubType::Executable(ExecutableSubType::ELF));
     }
 
     #[test]
     fn identify_type_reports_shared_object() {
         let result = identify_type(&elf_header(3, false));
         assert_eq!(result.file_type, RealFileType::LinuxExecutable);
-        assert_eq!(result.file_sub_type, RealFileSubType::SO);
+        assert_eq!(result.file_sub_type, RealFileSubType::Executable(ExecutableSubType::SO));
     }
 }
