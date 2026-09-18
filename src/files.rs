@@ -329,7 +329,7 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
 }
 
 fn check_elf(contents: &[u8]) -> RealFileType {
-    if contents[0] == 0x7F && contents[1] == 0x45 && contents[2] == 0x4C && contents[3] == 0x46 {
+    if contents.len() >= 4 && contents[0] == 0x7F && contents[1] == 0x45 && contents[2] == 0x4C && contents[3] == 0x46 {
         return RealFileType::LinuxExecutable;
     }
     return RealFileType::Unknown;
