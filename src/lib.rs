@@ -4,12 +4,12 @@
 //! malicious (`malware`) and whether its content trips any policy checks
 //! (`content`). Meant to be called as a CLI from any language/tool, not
 //! linked in as a library — see main.rs for the entry point.
-use content::profanity;
-use files::identify_type;
+use files::identify_real_filetype;
 use std::error::Error;
 use std::fs;
 
 use crate::{
+    content::scan_content,
     malware::yara_scan,
     types::{ErratasContentFlag, ErratasJob, FileInfo, RealFileSubType, RealFileType},
 };
@@ -25,9 +25,9 @@ pub fn scan(path: &str) {
     match load_file(path) {
         Ok(mut erratas_job) => {
             println!("Begining scanning");
-            identify_type(&mut erratas_job);
+            identify_real_filetype(&mut erratas_job);
             println!("Yara results {:?}", yara_scan(&mut erratas_job));
-            profanity();
+            //scan_content(&mut erratas_job).unwrap();
         }
         Err(e) => {
             println!("Error: {e}");

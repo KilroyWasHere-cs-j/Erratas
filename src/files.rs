@@ -5,7 +5,7 @@ use crate::types::{
     ExecutableSubType, ImageSubType, RealFileSubType, RealFileType, UnknownSubType, VideoSubType,
 };
 
-pub fn identify_type(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
+pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     if let Some(offset) = check_elf(&erratas_job.file_info.contents) {
         let file_sub_type = if is_elf_shared_object(&erratas_job.file_info.contents, offset) {
             ExecutableSubType::SO
@@ -112,8 +112,7 @@ pub fn identify_type(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         RealFileType::Archive => {
             erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
             erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Archive(ArchiveSubType::SEVENZ);
+            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::SEVENZ);
             return erratas_job;
         }
         _ => {}
@@ -160,8 +159,7 @@ pub fn identify_type(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         RealFileType::Document => {
             erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
             erratas_job.file_info.file_type = RealFileType::Document;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Document(DocumentSubType::PDF);
+            erratas_job.file_info.file_sub_type = RealFileSubType::Document(DocumentSubType::PDF);
             return erratas_job;
         }
         _ => {}
@@ -182,8 +180,7 @@ pub fn identify_type(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         RealFileType::Document => {
             erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
             erratas_job.file_info.file_type = RealFileType::Document;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Document(DocumentSubType::CHM);
+            erratas_job.file_info.file_sub_type = RealFileSubType::Document(DocumentSubType::CHM);
             return erratas_job;
         }
         _ => {}
@@ -1305,7 +1302,7 @@ mod tests {
         let mut contents = vec![0x90; 32];
         contents.extend_from_slice(&elf_header(3, false));
         let mut result = result_for(contents);
-        identify_type(&mut result);
+        identify_real_filetype(&mut result);
         assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
         assert_eq!(
             result.file_info.file_sub_type,
@@ -1316,7 +1313,7 @@ mod tests {
     #[test]
     fn identify_type_reports_elf_executable() {
         let mut result = result_for(elf_header(2, false));
-        identify_type(&mut result);
+        identify_real_filetype(&mut result);
         assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
         assert_eq!(
             result.file_info.file_sub_type,
@@ -1327,7 +1324,7 @@ mod tests {
     #[test]
     fn identify_type_reports_shared_object() {
         let mut result = result_for(elf_header(3, false));
-        identify_type(&mut result);
+        identify_real_filetype(&mut result);
         assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
         assert_eq!(
             result.file_info.file_sub_type,
@@ -1539,7 +1536,7 @@ mod tests {
     #[test]
     fn identify_type_reports_docx_end_to_end() {
         let mut result = result_for(ooxml_bytes(b"word/document.xml"));
-        identify_type(&mut result);
+        identify_real_filetype(&mut result);
         assert_eq!(result.file_info.file_type, RealFileType::Document);
         assert_eq!(
             result.file_info.file_sub_type,
@@ -1660,7 +1657,7 @@ mod tests {
     #[test]
     fn identify_type_reports_doc_end_to_end() {
         let mut result = result_for(cfb_with_stream("WordDocument"));
-        identify_type(&mut result);
+        identify_real_filetype(&mut result);
         assert_eq!(result.file_info.file_type, RealFileType::Document);
         assert_eq!(
             result.file_info.file_sub_type,
