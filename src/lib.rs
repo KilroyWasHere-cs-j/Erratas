@@ -21,22 +21,34 @@ pub mod files;
 pub mod malware;
 pub mod types;
 
-pub fn scan(path: &str) {
+pub fn scan(path: &str) -> ErratasJob {
     match load_file(path) {
         Ok(mut erratas_job) => {
             println!("Begining scanning");
             identify_real_filetype(&mut erratas_job);
             println!("Yara results {:?}", yara_scan(&mut erratas_job));
-            // OCR only makes sense on image content -- every other type
-            // (archives, executables, ...) would just fail format-sniffing
-            // in preprocess() every time, so skip the call entirely rather
-            // than pay for it and throw the error away.
-            if erratas_job.file_info.file_type == RealFileType::Image {
-                println!("Content scan results {:?}", scan_content(&mut erratas_job));
+            match scan_content(&mut erratas_job) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Error: {e}");
+                }
             }
+            erratas_job
         }
+        // No file could be read, so there's no real ErratasJob to hand
+        // back -- fills in the same "nothing determined yet" shape
+        // load_file itself starts every job from, just with an empty
+        // contents buffer instead of the unreadable file's bytes.
         Err(e) => {
             println!("Error: {e}");
+            ErratasJob {
+                file_info: FileInfo {
+                    contents: Vec::new(),
+                    content_flag: ErratasContentFlag::Unknown,
+                    file_type: RealFileType::Unknown,
+                    file_sub_type: RealFileSubType::Unknown(types::UnknownSubType::Unknown),
+                },
+            }
         }
     }
 }
