@@ -1,14 +1,15 @@
 #[derive(Debug)]
-pub struct File {
+pub struct FileInfo {
     pub contents: Vec<u8>,
+    pub content_flag: ErratasContentFlag,
     pub file_type: RealFileType,
     pub file_sub_type: RealFileSubType,
 }
 
 #[derive(Debug)]
 pub struct ErratasResult {
-    pub flags: Vec<ErratasContentFlag>,
-    pub file: File,
+    pub file_info: FileInfo,
+    //pub yara_results: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -22,6 +23,7 @@ pub enum ErratasContentFlag {
     HashMatching,
     YARA,
     Profanity,
+    Scanning,
     Unknown,
 }
 

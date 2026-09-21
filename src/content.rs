@@ -11,4 +11,3 @@ pub fn profanity() {
     let censored: String = "hello".chars().censor().collect();
     println!("{}", censored);
 }
-

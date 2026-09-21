@@ -6,9 +6,13 @@
 //! linked in as a library — see main.rs for the entry point.
 use content::profanity;
 use files::identify_type;
+use std::error::Error;
 use std::fs;
 
-use error::ErratasError;
+use crate::{
+    malware::yara_scan,
+    types::{ErratasContentFlag, ErratasResult, FileInfo, RealFileSubType, RealFileType},
+};
 
 pub mod consts;
 pub mod content;
@@ -19,14 +23,11 @@ pub mod types;
 
 pub fn scan(path: &str) {
     match load_file(path) {
-        Ok(_) => {
-            println!("All good!");
-        }
-        Err(ErratasError::FileNotFound) => {
-            println!("File not found.");
-        }
-        Err(ErratasError::ContentsTooShort) => {
-            println!("File too short.");
+        Ok(mut erratas_result) => {
+            println!("Begining scanning");
+            identify_type(&mut erratas_result);
+            println!("Yara results {:?}", yara_scan(&mut erratas_result));
+            profanity();
         }
         Err(e) => {
             println!("Error: {e}");
@@ -34,20 +35,15 @@ pub fn scan(path: &str) {
     }
 }
 
-fn load_file(path: &str) -> Result<(), ErratasError> {
+fn load_file(path: &str) -> Result<ErratasResult, Box<dyn Error>> {
     // TODO: Sanitize file path.
 
-    if !fs::metadata(path).is_ok() {
-        return Err(ErratasError::FileNotFound);
-    }
-    let file_content = fs::read(path)?;
-
-    println!("Scanning for malware...");
-    let result = identify_type(&file_content);
-    println!(
-        "Detected type: {:?} ({:?})",
-        result.file.file_type, result.file.file_sub_type
-    );
-    profanity();
-    Ok(())
+    Ok(ErratasResult {
+        file_info: FileInfo {
+            contents: fs::read(path)?,
+            content_flag: ErratasContentFlag::Scanning,
+            file_type: RealFileType::Unknown,
+            file_sub_type: RealFileSubType::Unknown(types::UnknownSubType::Unknown),
+        },
+    })
 }

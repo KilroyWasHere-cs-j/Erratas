@@ -1,37 +1,30 @@
-use crate::error::ErratasError;
+use std::error::Error;
+
 use crate::types::{
     ArchiveSubType, AudioSubType, DocumentSubType, ErratasContentFlag, ErratasResult,
-    ExecutableSubType, File, ImageSubType, RealFileSubType, RealFileType, UnknownSubType,
-    VideoSubType,
+    ExecutableSubType, ImageSubType, RealFileSubType, RealFileType, UnknownSubType, VideoSubType,
 };
 
-pub fn identify_type(contents: &[u8]) -> ErratasResult {
-    if let Some(offset) = check_elf(contents) {
-        let file_sub_type = if is_elf_shared_object(contents, offset) {
+pub fn identify_type(erratas_result: &mut ErratasResult) -> &mut ErratasResult {
+    if let Some(offset) = check_elf(&erratas_result.file_info.contents) {
+        let file_sub_type = if is_elf_shared_object(&erratas_result.file_info.contents, offset) {
             ExecutableSubType::SO
         } else {
             ExecutableSubType::ELF
         };
-        return ErratasResult {
-            flags: vec![ErratasContentFlag::BandedFileType],
-            file: File {
-                contents: contents.to_vec(),
-                file_type: RealFileType::LinuxExecutable,
-                file_sub_type: RealFileSubType::Executable(file_sub_type),
-            },
-        };
+        erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+        erratas_result.file_info.file_type = RealFileType::LinuxExecutable;
+        erratas_result.file_info.file_sub_type = RealFileSubType::Executable(file_sub_type);
+        return erratas_result;
     }
 
-    match check_winexe(contents) {
+    match check_winexe(&erratas_result.file_info.contents) {
         Ok(RealFileType::WinExecutable) => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::WinExecutable,
-                    file_sub_type: RealFileSubType::Executable(ExecutableSubType::PE),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::WinExecutable;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Executable(ExecutableSubType::PE);
+            return erratas_result;
         }
         Ok(_) => {}
         Err(e) => {
@@ -39,58 +32,45 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
         }
     }
 
-    match check_dll(contents) {
+    match check_dll(&erratas_result.file_info.contents) {
         RealFileType::WinExecutable => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::WinExecutable,
-                    file_sub_type: RealFileSubType::Executable(ExecutableSubType::DLL),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::WinExecutable;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Executable(ExecutableSubType::DLL);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_lnk(contents) {
+    match check_lnk(&erratas_result.file_info.contents) {
         RealFileType::WinExecutable => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::WinExecutable,
-                    file_sub_type: RealFileSubType::Executable(ExecutableSubType::LNK),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::WinExecutable;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Executable(ExecutableSubType::LNK);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_macho(contents) {
+    match check_macho(&erratas_result.file_info.contents) {
         RealFileType::MacExecutable => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::MacExecutable,
-                    file_sub_type: RealFileSubType::Executable(ExecutableSubType::MachO),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::MacExecutable;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Executable(ExecutableSubType::MachO);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_dmg(contents) {
+    match check_dmg(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::DMG),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::DMG);
+            return erratas_result;
         }
         _ => {}
     }
@@ -98,322 +78,232 @@ pub fn identify_type(contents: &[u8]) -> ErratasResult {
     // Must come before check_zip -- otherwise a .docx/.xlsx/.pptx would
     // already match as a plain Archive before we get a chance to notice
     // it's actually an OOXML document.
-    match check_ooxml(contents) {
+    match check_ooxml(&erratas_result.file_info.contents) {
         RealFileType::Document => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Document,
-                    file_sub_type: RealFileSubType::Document(DocumentSubType::OOXML),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Document;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Document(DocumentSubType::OOXML);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_zip(contents) {
+    match check_zip(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::ZIP),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::ZIP);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_rar(contents) {
+    match check_rar(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::RAR),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::RAR);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_7z(contents) {
+    match check_7z(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::SEVENZ),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Archive(ArchiveSubType::SEVENZ);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_cab(contents) {
+    match check_cab(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::CAB),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::CAB);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_tar(contents) {
+    match check_tar(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::TAR),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::TAR);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_iso(contents) {
+    match check_iso(&erratas_result.file_info.contents) {
         RealFileType::Archive => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Archive,
-                    file_sub_type: RealFileSubType::Archive(ArchiveSubType::ISO),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Archive;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::ISO);
+            return erratas_result;
         }
         RealFileType::WinExecutable => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::WinExecutable,
-                    file_sub_type: RealFileSubType::Executable(ExecutableSubType::PE),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::WinExecutable;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Executable(ExecutableSubType::PE);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_pdf(contents) {
+    match check_pdf(&erratas_result.file_info.contents) {
         RealFileType::Document => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Document,
-                    file_sub_type: RealFileSubType::Document(DocumentSubType::PDF),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Document;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Document(DocumentSubType::PDF);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_ole_cfb(contents) {
+    match check_ole_cfb(&erratas_result.file_info.contents) {
         RealFileType::Document => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Document,
-                    file_sub_type: RealFileSubType::Document(DocumentSubType::OLECFB),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Document;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Document(DocumentSubType::OLECFB);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_chm(contents) {
+    match check_chm(&erratas_result.file_info.contents) {
         RealFileType::Document => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Document,
-                    file_sub_type: RealFileSubType::Document(DocumentSubType::CHM),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Document;
+            erratas_result.file_info.file_sub_type =
+                RealFileSubType::Document(DocumentSubType::CHM);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_png(contents) {
+    match check_png(&erratas_result.file_info.contents) {
         RealFileType::Image => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Image,
-                    file_sub_type: RealFileSubType::Image(ImageSubType::PNG),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Image;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::PNG);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_jpeg(contents) {
+    match check_jpeg(&erratas_result.file_info.contents) {
         RealFileType::Image => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Image,
-                    file_sub_type: RealFileSubType::Image(ImageSubType::JPEG),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Image;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::JPEG);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_gif(contents) {
+    match check_gif(&erratas_result.file_info.contents) {
         RealFileType::Image => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Image,
-                    file_sub_type: RealFileSubType::Image(ImageSubType::GIF),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Image;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::GIF);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_bmp(contents) {
+    match check_bmp(&erratas_result.file_info.contents) {
         RealFileType::Image => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Image,
-                    file_sub_type: RealFileSubType::Image(ImageSubType::BMP),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Image;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::BMP);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_webp(contents) {
+    match check_webp(&erratas_result.file_info.contents) {
         RealFileType::Image => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Image,
-                    file_sub_type: RealFileSubType::Image(ImageSubType::WEBP),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Image;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::WEBP);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_wav(contents) {
+    match check_wav(&erratas_result.file_info.contents) {
         RealFileType::Audio => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Audio,
-                    file_sub_type: RealFileSubType::Audio(AudioSubType::WAV),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Audio;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::WAV);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_flac(contents) {
+    match check_flac(&erratas_result.file_info.contents) {
         RealFileType::Audio => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Audio,
-                    file_sub_type: RealFileSubType::Audio(AudioSubType::FLAC),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Audio;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::FLAC);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_ogg(contents) {
+    match check_ogg(&erratas_result.file_info.contents) {
         RealFileType::Audio => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Audio,
-                    file_sub_type: RealFileSubType::Audio(AudioSubType::OGG),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Audio;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::OGG);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_mp3(contents) {
+    match check_mp3(&erratas_result.file_info.contents) {
         RealFileType::Audio => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Audio,
-                    file_sub_type: RealFileSubType::Audio(AudioSubType::MP3),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Audio;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::MP3);
+            return erratas_result;
         }
         _ => {}
     }
 
-    match check_mp4(contents) {
+    match check_mp4(&erratas_result.file_info.contents) {
         RealFileType::Video => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Video,
-                    file_sub_type: RealFileSubType::Video(VideoSubType::MP4),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Video;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Video(VideoSubType::MP4);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_webm(contents) {
+    match check_webm(&erratas_result.file_info.contents) {
         RealFileType::Video => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Video,
-                    file_sub_type: RealFileSubType::Video(VideoSubType::WEBM),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Video;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Video(VideoSubType::WEBM);
+            return erratas_result;
         }
         _ => {}
     }
-    match check_avi(contents) {
+    match check_avi(&erratas_result.file_info.contents) {
         RealFileType::Video => {
-            return ErratasResult {
-                flags: vec![ErratasContentFlag::BandedFileType],
-                file: File {
-                    contents: contents.to_vec(),
-                    file_type: RealFileType::Video,
-                    file_sub_type: RealFileSubType::Video(VideoSubType::AVI),
-                },
-            };
+            erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
+            erratas_result.file_info.file_type = RealFileType::Video;
+            erratas_result.file_info.file_sub_type = RealFileSubType::Video(VideoSubType::AVI);
+            return erratas_result;
         }
         _ => {}
     }
 
-    return ErratasResult {
-        flags: vec![ErratasContentFlag::Unknown],
-        file: File {
-            contents: contents.to_vec(),
-            file_type: RealFileType::Unknown,
-            file_sub_type: RealFileSubType::Unknown(UnknownSubType::Unknown),
-        },
-    };
+    erratas_result.file_info.content_flag = ErratasContentFlag::Unknown;
+    erratas_result.file_info.file_type = RealFileType::Unknown;
+    erratas_result.file_info.file_sub_type = RealFileSubType::Unknown(UnknownSubType::Unknown);
+    return erratas_result;
 }
 
 // Returns the byte offset where the ELF magic was found, so callers (like
@@ -537,7 +427,7 @@ fn check_macho(contents: &[u8]) -> RealFileType {
     RealFileType::Unknown
 }
 
-fn check_winexe(contents: &[u8]) -> Result<RealFileType, ErratasError> {
+fn check_winexe(contents: &[u8]) -> Result<RealFileType, Box<dyn Error>> {
     if contents.len() < 64 {
         return Ok(RealFileType::Unknown);
     }
@@ -1129,6 +1019,22 @@ fn check_avi(contents: &[u8]) -> RealFileType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FileInfo;
+
+    // identify_type now takes an &mut ErratasResult and mutates it in
+    // place rather than taking raw bytes directly -- this builds the
+    // "freshly read, not yet scanned" starting point the same way
+    // lib.rs's load_file does, so tests can still just hand it bytes.
+    fn result_for(contents: Vec<u8>) -> ErratasResult {
+        ErratasResult {
+            file_info: FileInfo {
+                contents,
+                content_flag: ErratasContentFlag::Scanning,
+                file_type: RealFileType::Unknown,
+                file_sub_type: RealFileSubType::Unknown(UnknownSubType::Unknown),
+            },
+        }
+    }
 
     // Builds a minimal ELF header: magic + EI_DATA (endianness) + e_type,
     // zero-padded to 64 bytes so it also clears check_winexe's length gate.
@@ -1192,31 +1098,190 @@ mod tests {
         // instead of misreading e_type from the wrong bytes.
         let mut contents = vec![0x90; 32];
         contents.extend_from_slice(&elf_header(3, false));
-        let result = identify_type(&contents);
-        assert_eq!(result.file.file_type, RealFileType::LinuxExecutable);
+        let mut result = result_for(contents);
+        identify_type(&mut result);
+        assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
         assert_eq!(
-            result.file.file_sub_type,
+            result.file_info.file_sub_type,
             RealFileSubType::Executable(ExecutableSubType::SO)
         );
     }
 
     #[test]
     fn identify_type_reports_elf_executable() {
-        let result = identify_type(&elf_header(2, false));
-        assert_eq!(result.file.file_type, RealFileType::LinuxExecutable);
+        let mut result = result_for(elf_header(2, false));
+        identify_type(&mut result);
+        assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
         assert_eq!(
-            result.file.file_sub_type,
+            result.file_info.file_sub_type,
             RealFileSubType::Executable(ExecutableSubType::ELF)
         );
     }
 
     #[test]
     fn identify_type_reports_shared_object() {
-        let result = identify_type(&elf_header(3, false));
-        assert_eq!(result.file.file_type, RealFileType::LinuxExecutable);
+        let mut result = result_for(elf_header(3, false));
+        identify_type(&mut result);
+        assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
         assert_eq!(
-            result.file.file_sub_type,
+            result.file_info.file_sub_type,
             RealFileSubType::Executable(ExecutableSubType::SO)
         );
+    }
+
+    // --- scan_for / scan_for_at_offset --------------------------------
+    // These back nearly every format's shifted/carved fallback path, but
+    // had no direct coverage of their own -- only ever exercised
+    // indirectly through whichever check_* happened to call them.
+
+    #[test]
+    fn scan_for_finds_pattern_in_the_middle() {
+        assert!(scan_for(b"....needle....", b"needle"));
+    }
+
+    #[test]
+    fn scan_for_finds_pattern_at_the_very_end() {
+        assert!(scan_for(b"....needle", b"needle"));
+    }
+
+    #[test]
+    fn scan_for_false_when_pattern_absent() {
+        assert!(!scan_for(b"nothing to see here", b"needle"));
+    }
+
+    #[test]
+    fn scan_for_false_for_empty_pattern() {
+        assert!(!scan_for(b"anything", b""));
+    }
+
+    #[test]
+    fn scan_for_false_when_pattern_longer_than_contents() {
+        assert!(!scan_for(b"short", b"way too long a needle"));
+    }
+
+    #[test]
+    fn scan_for_at_offset_finds_anchor_and_tag_at_the_right_gap() {
+        // "RIFF" at 0, "WAVE" 8 bytes later -- the real WAV layout.
+        let mut contents = b"RIFF".to_vec();
+        contents.extend_from_slice(&[0u8; 4]); // 4 bytes of chunk size filler
+        contents.extend_from_slice(b"WAVE");
+        assert!(scan_for_at_offset(&contents, b"RIFF", 8, b"WAVE"));
+    }
+
+    #[test]
+    fn scan_for_at_offset_false_when_anchor_present_but_tag_is_wrong() {
+        let mut contents = b"RIFF".to_vec();
+        contents.extend_from_slice(&[0u8; 4]);
+        contents.extend_from_slice(b"AVI ");
+        assert!(!scan_for_at_offset(&contents, b"RIFF", 8, b"WAVE"));
+    }
+
+    #[test]
+    fn scan_for_at_offset_false_when_anchor_absent() {
+        assert!(!scan_for_at_offset(b"no anchor here", b"RIFF", 8, b"WAVE"));
+    }
+
+    #[test]
+    fn scan_for_at_offset_false_when_gap_runs_past_end() {
+        // Anchor matches right at the end, leaving no room for the tag.
+        assert!(!scan_for_at_offset(b"....RIFF", b"RIFF", 8, b"WAVE"));
+    }
+
+    // --- check_winexe ----------------------------------------------------
+
+    #[test]
+    fn check_winexe_reports_unknown_under_64_bytes() {
+        assert_eq!(check_winexe(&[0x4D, 0x5A]).unwrap(), RealFileType::Unknown);
+    }
+
+    #[test]
+    fn check_winexe_detects_mz_pe_at_the_standard_offsets() {
+        let mut contents = vec![0u8; 64];
+        contents[0] = 0x4D;
+        contents[1] = 0x5A;
+        contents[0x3C] = 0x50;
+        contents[0x3C + 1] = 0x45;
+        contents[0x3C + 2] = 0x00;
+        contents[0x3C + 3] = 0x00;
+        assert_eq!(
+            check_winexe(&contents).unwrap(),
+            RealFileType::WinExecutable
+        );
+    }
+
+    #[test]
+    fn check_winexe_mz_without_pe_is_unknown() {
+        let mut contents = vec![0u8; 64];
+        contents[0] = 0x4D;
+        contents[1] = 0x5A;
+        assert_eq!(check_winexe(&contents).unwrap(), RealFileType::Unknown);
+    }
+
+    #[test]
+    fn check_winexe_finds_shifted_mz_and_pe_via_fallback_scan() {
+        // Neither marker sits at its normal offset -- both are pushed well
+        // past where the fast path looks, so this only passes if the
+        // fallback scan loops actually run and find them separately.
+        let mut contents = vec![0x90; 128];
+        contents[40] = 0x4D;
+        contents[41] = 0x5A;
+        contents[100] = 0x50;
+        contents[101] = 0x45;
+        contents[102] = 0x00;
+        contents[103] = 0x00;
+        assert_eq!(
+            check_winexe(&contents).unwrap(),
+            RealFileType::WinExecutable
+        );
+    }
+
+    // --- check_dll / check_dll_at -----------------------------------------
+
+    // Mirrors scripts/generate_and_scan_examples.sh's example.dll fixture:
+    // MZ at 0, e_lfanew (offset 0x3C) pointing to a PE header at 0x80, with
+    // `characteristics` written at the COFF header's characteristics field
+    // (pe header + 4-byte "PE\0\0" sig + 18 bytes = pe_off + 22).
+    fn dll_header(characteristics: u16) -> Vec<u8> {
+        let mut bytes = vec![0u8; 256];
+        bytes[0] = 0x4D;
+        bytes[1] = 0x5A;
+        bytes[0x3C..0x3C + 4].copy_from_slice(&(0x80u32).to_le_bytes());
+        let pe_off = 0x80;
+        bytes[pe_off] = 0x50;
+        bytes[pe_off + 1] = 0x45;
+        bytes[pe_off + 2] = 0x00;
+        bytes[pe_off + 3] = 0x00;
+        let characteristics_off = pe_off + 4 + 18;
+        bytes[characteristics_off..characteristics_off + 2]
+            .copy_from_slice(&characteristics.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn check_dll_detects_the_image_file_dll_characteristic() {
+        const IMAGE_FILE_DLL: u16 = 0x2000;
+        assert_eq!(
+            check_dll(&dll_header(IMAGE_FILE_DLL)),
+            RealFileType::WinExecutable
+        );
+    }
+
+    #[test]
+    fn check_dll_is_unknown_without_the_dll_characteristic() {
+        // IMAGE_FILE_EXECUTABLE_IMAGE, not IMAGE_FILE_DLL -- a normal EXE's
+        // flag, not a library's.
+        assert_eq!(check_dll(&dll_header(0x0002)), RealFileType::Unknown);
+    }
+
+    #[test]
+    fn check_dll_at_none_when_too_short_for_a_header() {
+        assert_eq!(check_dll_at(&[0x4D, 0x5A], 0), None);
+    }
+
+    #[test]
+    fn check_dll_at_none_without_the_mz_magic() {
+        let mut contents = dll_header(0x2000);
+        contents[0] = 0x00; // corrupt the MZ magic
+        assert_eq!(check_dll_at(&contents, 0), None);
     }
 }
