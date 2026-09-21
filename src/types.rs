@@ -1,4 +1,18 @@
 #[derive(Debug)]
+pub struct FileInfo {
+    pub contents: Vec<u8>,
+    pub content_flag: ErratasContentFlag,
+    pub file_type: RealFileType,
+    pub file_sub_type: RealFileSubType,
+}
+
+#[derive(Debug)]
+pub struct ErratasResult {
+    pub file_info: FileInfo,
+    //pub yara_results: Vec<String>,
+}
+
+#[derive(Debug)]
 pub enum ErratasContentFlag {
     AllGood,
     BandedFileType,
@@ -9,12 +23,13 @@ pub enum ErratasContentFlag {
     HashMatching,
     YARA,
     Profanity,
-    Unknown
+    Scanning,
+    Unknown,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum UnknownSubType {
-    Unknown
+    Unknown,
 }
 
 #[derive(Debug, PartialEq)]
@@ -27,7 +42,7 @@ pub enum RealFileType {
     WinExecutable,
     MacExecutable,
     LinuxExecutable,
-    Unknown
+    Unknown,
 }
 
 #[derive(Debug, PartialEq)]
@@ -98,11 +113,4 @@ pub enum RealFileSubType {
     Document(DocumentSubType),
     Archive(ArchiveSubType),
     Executable(ExecutableSubType),
-}
-
-#[derive(Debug)]
-pub struct ErratasResult {
-    pub flags: Vec<ErratasContentFlag>,
-    pub file_type: RealFileType,
-    pub file_sub_type: RealFileSubType
 }
