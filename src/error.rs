@@ -6,6 +6,7 @@ pub enum ErratasError {
     ContentsTooShort,
     FileNotFound,
     YaraCompile(yara_x::errors::CompileError),
+    ScanError(yara_x::errors::ScanError),
 }
 
 impl fmt::Display for ErratasError {
@@ -15,6 +16,7 @@ impl fmt::Display for ErratasError {
             ErratasError::ContentsTooShort => write!(f, "contents too short"),
             ErratasError::FileNotFound => write!(f, "file not found"),
             ErratasError::YaraCompile(e) => write!(f, "yara rule compile error: {e}"),
+            ErratasError::ScanError(e) => write!(f, "yara scan error: {e}"),
         }
     }
 }
@@ -44,3 +46,8 @@ impl From<yara_x::errors::CompileError> for ErratasError {
     }
 }
 
+impl From<yara_x::errors::ScanError> for ErratasError {
+    fn from(e: yara_x::errors::ScanError) -> Self {
+        ErratasError::ScanError(e)
+    }
+}
