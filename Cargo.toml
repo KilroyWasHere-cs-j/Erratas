@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+image = "0.25.10"
+imageproc = "0.27.0"
 rustrict = "0.7.39"
 serde = "1.0.229"
+tesseract = "0.15.2"
 yara-x = "1.20.0"

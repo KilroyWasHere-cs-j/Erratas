@@ -7,7 +7,7 @@ pub struct FileInfo {
 }
 
 #[derive(Debug)]
-pub struct ErratasResult {
+pub struct ErratasJob {
     pub file_info: FileInfo,
     //pub yara_results: Vec<String>,
 }

@@ -11,7 +11,7 @@ use std::fs;
 
 use crate::{
     malware::yara_scan,
-    types::{ErratasContentFlag, ErratasResult, FileInfo, RealFileSubType, RealFileType},
+    types::{ErratasContentFlag, ErratasJob, FileInfo, RealFileSubType, RealFileType},
 };
 
 pub mod consts;
@@ -23,10 +23,10 @@ pub mod types;
 
 pub fn scan(path: &str) {
     match load_file(path) {
-        Ok(mut erratas_result) => {
+        Ok(mut erratas_job) => {
             println!("Begining scanning");
-            identify_type(&mut erratas_result);
-            println!("Yara results {:?}", yara_scan(&mut erratas_result));
+            identify_type(&mut erratas_job);
+            println!("Yara results {:?}", yara_scan(&mut erratas_job));
             profanity();
         }
         Err(e) => {
@@ -35,10 +35,10 @@ pub fn scan(path: &str) {
     }
 }
 
-fn load_file(path: &str) -> Result<ErratasResult, Box<dyn Error>> {
+fn load_file(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
     // TODO: Sanitize file path.
 
-    Ok(ErratasResult {
+    Ok(ErratasJob {
         file_info: FileInfo {
             contents: fs::read(path)?,
             content_flag: ErratasContentFlag::Scanning,

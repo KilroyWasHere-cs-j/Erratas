@@ -7,7 +7,7 @@ use std::fs;
 use std::process::ExitCode;
 
 use erratas::types::{
-    ErratasContentFlag, ErratasResult, FileInfo, RealFileSubType, RealFileType, UnknownSubType,
+    ErratasContentFlag, ErratasJob, FileInfo, RealFileSubType, RealFileType, UnknownSubType,
 };
 
 fn main() -> ExitCode {
@@ -26,11 +26,11 @@ fn main() -> ExitCode {
         }
     };
 
-    // yara_scan takes the whole ErratasResult now rather than raw bytes,
+    // yara_scan takes the whole ErratasJob now rather than raw bytes,
     // so build the same "freshly read, not yet scanned" starting point
     // load_file/identify_type's tests use -- only file_info.contents
     // actually matters here, the rest is unexamined by yara_scan today.
-    let mut result = ErratasResult {
+    let mut result = ErratasJob {
         file_info: FileInfo {
             contents,
             content_flag: ErratasContentFlag::Scanning,
