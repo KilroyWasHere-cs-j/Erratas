@@ -83,7 +83,7 @@ pub fn identify_type(erratas_result: &mut ErratasResult) -> &mut ErratasResult {
             erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
             erratas_result.file_info.file_type = RealFileType::Document;
             erratas_result.file_info.file_sub_type =
-                RealFileSubType::Document(DocumentSubType::OOXML);
+                RealFileSubType::Document(ooxml_subtype(&erratas_result.file_info.contents));
             return erratas_result;
         }
         _ => {}
@@ -172,7 +172,7 @@ pub fn identify_type(erratas_result: &mut ErratasResult) -> &mut ErratasResult {
             erratas_result.file_info.content_flag = ErratasContentFlag::BandedFileType;
             erratas_result.file_info.file_type = RealFileType::Document;
             erratas_result.file_info.file_sub_type =
-                RealFileSubType::Document(DocumentSubType::OLECFB);
+                RealFileSubType::Document(ole_cfb_subtype(&erratas_result.file_info.contents));
             return erratas_result;
         }
         _ => {}
@@ -520,6 +520,24 @@ fn check_ooxml(contents: &[u8]) -> RealFileType {
     RealFileType::Unknown
 }
 
+// Only called once check_ooxml has already confirmed the file is some
+// kind of OOXML package -- picks out which one by scanning for the entry
+// name each format's package always carries at a fixed path. Falls back
+// to the generic OOXML variant if none of the three match (a format this
+// doesn't know about yet, or a package that's missing that entry).
+fn ooxml_subtype(contents: &[u8]) -> DocumentSubType {
+    if scan_for(contents, b"word/document.xml") {
+        return DocumentSubType::DOCX;
+    }
+    if scan_for(contents, b"xl/workbook.xml") {
+        return DocumentSubType::XLSX;
+    }
+    if scan_for(contents, b"ppt/presentation.xml") {
+        return DocumentSubType::PPTX;
+    }
+    DocumentSubType::OOXML
+}
+
 fn check_zip(contents: &[u8]) -> RealFileType {
     if contents.len() >= 4 {
         // Local file header.
@@ -682,6 +700,194 @@ fn check_ole_cfb(contents: &[u8]) -> RealFileType {
         return RealFileType::Document;
     }
     RealFileType::Unknown
+}
+
+// Only called once check_ole_cfb has already confirmed the file is some
+// kind of Compound File Binary container -- walks the File Allocation
+// Table (FAT) to find the directory sectors, then reads each directory
+// entry's stream/storage name looking for one of the three names each
+// legacy Office format always carries (MS-DOC/XLS/PPT), the way the
+// module comment on check_ole_cfb already says this needs to work: real
+// structure, not another magic-byte scan.
+//
+// Deliberately linear rather than reconstructing the directory's
+// red-black tree the spec describes -- the tree only matters for
+// enumerating a live filesystem-like view of the container; spotting
+// whether one particular stream name exists anywhere in it doesn't need
+// that.
+//
+// Every read here is bounds-checked (`.get()`, never a bare index) and
+// every sector-chain walk is capped against cycles -- this parses
+// untrusted, potentially adversarial files, so a truncated header, an
+// out-of-range sector pointer, or a FAT chain someone deliberately
+// looped back on itself must fail closed (fall through to the generic
+// OLECFB classification) instead of panicking or hanging.
+//
+// Scoped to CFB v3 (512-byte sectors) only -- that's what legacy Office
+// documents actually use in practice. v4 (4096-byte sectors, mainly for
+// >2GB containers) places sector 0 right after a 4096-byte first block
+// rather than the fixed 512-byte header this reads; rather than get that
+// offset wrong, v4 containers just fall back to the generic OLECFB
+// classification below.
+fn ole_cfb_subtype(contents: &[u8]) -> DocumentSubType {
+    const FREESECT: u32 = 0xFFFFFFFF;
+    const ENDOFCHAIN: u32 = 0xFFFFFFFE;
+    const HEADER_SIZE: usize = 512;
+    const SECTOR_SIZE: usize = 512;
+    const DIFAT_IN_HEADER: usize = 109;
+    const ENTRY_SIZE: usize = 128;
+
+    let read_u16 = |off: usize| -> Option<u16> {
+        contents
+            .get(off..off + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+    };
+    let read_u32 = |off: usize| -> Option<u32> {
+        contents
+            .get(off..off + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+
+    if contents.len() < HEADER_SIZE {
+        return DocumentSubType::OLECFB;
+    }
+    let Some(sector_shift) = read_u16(30) else {
+        return DocumentSubType::OLECFB;
+    };
+    if sector_shift != 9 {
+        // Not a 512-byte-sector (v3) container -- see the v4 note above.
+        return DocumentSubType::OLECFB;
+    }
+    let Some(num_fat_sectors) = read_u32(44) else {
+        return DocumentSubType::OLECFB;
+    };
+    let Some(first_dir_sector) = read_u32(48) else {
+        return DocumentSubType::OLECFB;
+    };
+    let Some(first_difat_sector) = read_u32(68) else {
+        return DocumentSubType::OLECFB;
+    };
+    let Some(num_difat_sectors) = read_u32(72) else {
+        return DocumentSubType::OLECFB;
+    };
+
+    // Sector `id` lives right after the fixed 512-byte header.
+    let sector = |id: u32| -> Option<&[u8]> {
+        let start = HEADER_SIZE.checked_add((id as usize).checked_mul(SECTOR_SIZE)?)?;
+        contents.get(start..start.checked_add(SECTOR_SIZE)?)
+    };
+
+    // Collect every FAT sector's location: the first 109 come straight
+    // from the header's own embedded DIFAT array, and any beyond that
+    // come from chained DIFAT sectors (only needed for containers over
+    // ~7MB at 512-byte sectors -- rare for legacy Office documents, but
+    // real, so it's still followed rather than silently truncated).
+    let mut fat_sector_ids = Vec::new();
+    for i in 0..DIFAT_IN_HEADER.min(num_fat_sectors as usize) {
+        match read_u32(76 + i * 4) {
+            Some(id) if id != FREESECT => fat_sector_ids.push(id),
+            _ => break,
+        }
+    }
+    let mut difat_id = first_difat_sector;
+    let mut difat_sectors_seen = 0usize;
+    while difat_id != ENDOFCHAIN
+        && difat_id != FREESECT
+        && difat_sectors_seen < num_difat_sectors as usize
+        && difat_sectors_seen < 4096
+    {
+        let Some(s) = sector(difat_id) else { break };
+        // The last 4-byte slot in a DIFAT sector is the next DIFAT
+        // sector's location, not a FAT sector pointer.
+        let entries_per_sector = SECTOR_SIZE / 4 - 1;
+        for i in 0..entries_per_sector {
+            let Some(bytes) = s.get(i * 4..i * 4 + 4) else {
+                break;
+            };
+            let id = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            if id == FREESECT {
+                break;
+            }
+            fat_sector_ids.push(id);
+        }
+        let Some(next_bytes) = s.get(SECTOR_SIZE - 4..SECTOR_SIZE) else {
+            break;
+        };
+        difat_id = u32::from_le_bytes([next_bytes[0], next_bytes[1], next_bytes[2], next_bytes[3]]);
+        difat_sectors_seen += 1;
+    }
+
+    // Flatten every FAT sector's u32 entries into one lookup table:
+    // fat[sector_id] gives the next sector in that sector's chain.
+    let entries_per_fat_sector = SECTOR_SIZE / 4;
+    let mut fat = vec![FREESECT; fat_sector_ids.len() * entries_per_fat_sector];
+    for (slot, &fat_sector_id) in fat_sector_ids.iter().enumerate() {
+        let Some(s) = sector(fat_sector_id) else {
+            continue;
+        };
+        for i in 0..entries_per_fat_sector {
+            let Some(bytes) = s.get(i * 4..i * 4 + 4) else {
+                break;
+            };
+            fat[slot * entries_per_fat_sector + i] =
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        }
+    }
+
+    // Walk the directory sector chain. `seen.insert` doubles as both the
+    // dedup and the cycle guard -- a chain that loops back on a sector it
+    // already visited stops on the second visit rather than spinning.
+    let mut dir_sector_ids = Vec::new();
+    let mut current = first_dir_sector;
+    let mut seen = std::collections::HashSet::new();
+    while current != ENDOFCHAIN && current != FREESECT && seen.insert(current) {
+        dir_sector_ids.push(current);
+        match fat.get(current as usize) {
+            Some(&next) => current = next,
+            None => break,
+        }
+    }
+
+    // Each 128-byte directory entry starts with a UTF-16LE name (up to 64
+    // bytes) and a byte length for it at offset 64 -- read every entry in
+    // every directory sector and check its name against the stream each
+    // legacy Office format is known to store.
+    for dir_sector_id in dir_sector_ids {
+        let Some(s) = sector(dir_sector_id) else {
+            continue;
+        };
+        for entry in s.chunks(ENTRY_SIZE) {
+            if entry.len() < ENTRY_SIZE {
+                continue;
+            }
+            let object_type = entry[66];
+            // 1 = storage, 2 = stream, 5 = root storage; 0 is an
+            // unused/unallocated slot with no meaningful name.
+            if object_type == 0 {
+                continue;
+            }
+            let name_len = u16::from_le_bytes([entry[64], entry[65]]) as usize;
+            // name_len is a byte count that includes the trailing UTF-16
+            // nul, and per spec can't exceed the 64-byte name field.
+            if !(2..=64).contains(&name_len) {
+                continue;
+            }
+            let name: String = entry[0..name_len - 2]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], *c.get(1).unwrap_or(&0)]))
+                .filter_map(|u| char::from_u32(u as u32))
+                .collect();
+
+            match name.as_str() {
+                "WordDocument" => return DocumentSubType::DOC,
+                "Workbook" | "Book" => return DocumentSubType::XLS,
+                "PowerPoint Document" => return DocumentSubType::PPT,
+                _ => {}
+            }
+        }
+    }
+
+    DocumentSubType::OLECFB
 }
 
 fn check_chm(contents: &[u8]) -> RealFileType {
@@ -1283,5 +1489,228 @@ mod tests {
         let mut contents = dll_header(0x2000);
         contents[0] = 0x00; // corrupt the MZ magic
         assert_eq!(check_dll_at(&contents, 0), None);
+    }
+
+    // --- ooxml_subtype -----------------------------------------------
+
+    // The real files are ZIP archives; scan_for only needs the entry
+    // *names* to be present as bytes somewhere in the file, not a real,
+    // valid ZIP central directory -- same shortcut check_ooxml itself
+    // already relies on.
+    fn ooxml_bytes(marker: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x50, 0x4B, 0x03, 0x04]; // ZIP local file header
+        bytes.extend_from_slice(b"[Content_Types].xml");
+        bytes.extend_from_slice(marker);
+        bytes
+    }
+
+    #[test]
+    fn ooxml_subtype_detects_docx() {
+        assert_eq!(
+            ooxml_subtype(&ooxml_bytes(b"word/document.xml")),
+            DocumentSubType::DOCX
+        );
+    }
+
+    #[test]
+    fn ooxml_subtype_detects_xlsx() {
+        assert_eq!(
+            ooxml_subtype(&ooxml_bytes(b"xl/workbook.xml")),
+            DocumentSubType::XLSX
+        );
+    }
+
+    #[test]
+    fn ooxml_subtype_detects_pptx() {
+        assert_eq!(
+            ooxml_subtype(&ooxml_bytes(b"ppt/presentation.xml")),
+            DocumentSubType::PPTX
+        );
+    }
+
+    #[test]
+    fn ooxml_subtype_falls_back_to_generic_when_unrecognized() {
+        assert_eq!(
+            ooxml_subtype(&ooxml_bytes(b"some/other/entry.xml")),
+            DocumentSubType::OOXML
+        );
+    }
+
+    #[test]
+    fn identify_type_reports_docx_end_to_end() {
+        let mut result = result_for(ooxml_bytes(b"word/document.xml"));
+        identify_type(&mut result);
+        assert_eq!(result.file_info.file_type, RealFileType::Document);
+        assert_eq!(
+            result.file_info.file_sub_type,
+            RealFileSubType::Document(DocumentSubType::DOCX)
+        );
+    }
+
+    // --- ole_cfb_subtype -----------------------------------------------
+    // Builds a minimal but spec-correct CFB v3 container: 512-byte
+    // header, one FAT sector, one directory sector holding a root entry
+    // plus a single named stream entry. Real legacy Office files carry
+    // far more (SummaryInformation, CompObj, etc.) but this is enough to
+    // exercise the actual mechanism -- DIFAT lookup, FAT chain walk,
+    // directory sector scan, UTF-16LE name decode -- rather than just
+    // the magic bytes.
+    fn cfb_with_stream(stream_name: &str) -> Vec<u8> {
+        const SECTOR_SIZE: usize = 512;
+        let mut bytes = vec![0u8; SECTOR_SIZE]; // header, filled in below
+
+        // Signature.
+        bytes[0..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+        // Major version 3, byte order mark, sector shift 9 (512), mini
+        // sector shift 6 (64) -- offsets 26, 28, 30, 32.
+        bytes[26..28].copy_from_slice(&3u16.to_le_bytes());
+        bytes[28..30].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        bytes[30..32].copy_from_slice(&9u16.to_le_bytes());
+        bytes[32..34].copy_from_slice(&6u16.to_le_bytes());
+        // Number of FAT sectors = 1 (offset 44).
+        bytes[44..48].copy_from_slice(&1u32.to_le_bytes());
+        // First directory sector location = sector 1 (offset 48).
+        bytes[48..52].copy_from_slice(&1u32.to_le_bytes());
+        // No mini FAT (offset 60/64) and no extra DIFAT sectors (offset
+        // 68/72) -- everything fits in the header's own 109-entry DIFAT.
+        bytes[60..64].copy_from_slice(&0xFFFFFFFEu32.to_le_bytes());
+        bytes[68..72].copy_from_slice(&0xFFFFFFFEu32.to_le_bytes());
+        // DIFAT[0] = sector 0 is the (only) FAT sector; the rest of the
+        // 109-entry array is left as FREESECT (0xFFFFFFFF) via fill.
+        bytes[76..76 + 436].fill(0xFF);
+        bytes[76..80].copy_from_slice(&0u32.to_le_bytes());
+
+        // Sector 0: the FAT itself (128 u32 entries). FAT[0] marks
+        // itself as a FAT sector; FAT[1] (the directory sector) is a
+        // single-sector chain, so it ends immediately.
+        let mut fat_sector = vec![0xFFu8; SECTOR_SIZE]; // FREESECT-filled
+        fat_sector[0..4].copy_from_slice(&0xFFFFFFFDu32.to_le_bytes()); // FATSECT
+        fat_sector[4..8].copy_from_slice(&0xFFFFFFFEu32.to_le_bytes()); // ENDOFCHAIN
+        bytes.extend_from_slice(&fat_sector);
+
+        // Sector 1: the directory sector, four 128-byte entries. Entry 0
+        // is the mandatory root entry; entry 1 is the named stream under
+        // test; entries 2-3 stay unallocated (object type 0, from the
+        // zero-fill).
+        let mut dir_sector = vec![0u8; SECTOR_SIZE];
+        write_dir_entry(&mut dir_sector[0..128], "Root Entry", 5);
+        write_dir_entry(&mut dir_sector[128..256], stream_name, 2);
+        bytes.extend_from_slice(&dir_sector);
+
+        bytes
+    }
+
+    // Writes a directory entry's name (UTF-16LE, null-terminated) and
+    // object type into a 128-byte entry slice. Sibling/child IDs and
+    // starting sector are left as 0xFFFFFFFF (NOSTREAM/FREESECT) --
+    // ole_cfb_subtype never dereferences them, it only reads names.
+    fn write_dir_entry(entry: &mut [u8], name: &str, object_type: u8) {
+        let utf16: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        for (i, unit) in utf16.iter().enumerate() {
+            entry[i * 2..i * 2 + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        let name_len = (utf16.len() * 2) as u16;
+        entry[64..66].copy_from_slice(&name_len.to_le_bytes());
+        entry[66] = object_type;
+        entry[68..84].fill(0xFF); // left/right sibling + child ID
+    }
+
+    #[test]
+    fn ole_cfb_subtype_detects_doc_via_worddocument_stream() {
+        assert_eq!(
+            ole_cfb_subtype(&cfb_with_stream("WordDocument")),
+            DocumentSubType::DOC
+        );
+    }
+
+    #[test]
+    fn ole_cfb_subtype_detects_xls_via_workbook_stream() {
+        assert_eq!(
+            ole_cfb_subtype(&cfb_with_stream("Workbook")),
+            DocumentSubType::XLS
+        );
+    }
+
+    #[test]
+    fn ole_cfb_subtype_detects_xls_via_legacy_book_stream() {
+        assert_eq!(
+            ole_cfb_subtype(&cfb_with_stream("Book")),
+            DocumentSubType::XLS
+        );
+    }
+
+    #[test]
+    fn ole_cfb_subtype_detects_ppt_via_powerpoint_document_stream() {
+        assert_eq!(
+            ole_cfb_subtype(&cfb_with_stream("PowerPoint Document")),
+            DocumentSubType::PPT
+        );
+    }
+
+    #[test]
+    fn ole_cfb_subtype_falls_back_to_generic_for_unrecognized_stream() {
+        // e.g. an MSI/MSG container, or any other CFB-based format this
+        // doesn't specifically recognize.
+        assert_eq!(
+            ole_cfb_subtype(&cfb_with_stream("_SomeOtherStream")),
+            DocumentSubType::OLECFB
+        );
+    }
+
+    #[test]
+    fn identify_type_reports_doc_end_to_end() {
+        let mut result = result_for(cfb_with_stream("WordDocument"));
+        identify_type(&mut result);
+        assert_eq!(result.file_info.file_type, RealFileType::Document);
+        assert_eq!(
+            result.file_info.file_sub_type,
+            RealFileSubType::Document(DocumentSubType::DOC)
+        );
+    }
+
+    // --- ole_cfb_subtype robustness on malformed/adversarial input -----
+    // This parses untrusted files, so corrupt/truncated/cyclic input
+    // must fail closed (fall back to OLECFB) rather than panic or hang.
+
+    #[test]
+    fn ole_cfb_subtype_does_not_panic_on_bare_magic_with_no_header() {
+        let sig = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        assert_eq!(ole_cfb_subtype(&sig), DocumentSubType::OLECFB);
+    }
+
+    #[test]
+    fn ole_cfb_subtype_does_not_panic_on_truncated_header() {
+        let mut contents = cfb_with_stream("WordDocument");
+        contents.truncate(300); // cuts off mid-header, before the DIFAT
+        assert_eq!(ole_cfb_subtype(&contents), DocumentSubType::OLECFB);
+    }
+
+    #[test]
+    fn ole_cfb_subtype_does_not_panic_when_dir_sector_pointer_is_out_of_range() {
+        let mut contents = cfb_with_stream("WordDocument");
+        // First directory sector location (header offset 48) points far
+        // past the end of the file.
+        contents[48..52].copy_from_slice(&0xFFFFFFF0u32.to_le_bytes());
+        assert_eq!(ole_cfb_subtype(&contents), DocumentSubType::OLECFB);
+    }
+
+    #[test]
+    fn ole_cfb_subtype_does_not_hang_on_a_self_referential_fat_chain() {
+        let mut contents = cfb_with_stream("WordDocument");
+        // Point the directory chain's FAT entry (FAT[1], inside sector 0
+        // at header offset 512 + 4) back at itself instead of
+        // ENDOFCHAIN.
+        let self_ref_offset = 512 + 4;
+        contents[self_ref_offset..self_ref_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+        // Just needs to return, not necessarily any particular value --
+        // the point is the cycle guard actually stops the walk.
+        let _ = ole_cfb_subtype(&contents);
+    }
+
+    #[test]
+    fn ole_cfb_subtype_falls_back_for_v4_sector_shift() {
+        let mut contents = cfb_with_stream("WordDocument");
+        contents[30..32].copy_from_slice(&12u16.to_le_bytes()); // 4096-byte sectors
+        assert_eq!(ole_cfb_subtype(&contents), DocumentSubType::OLECFB);
     }
 }
