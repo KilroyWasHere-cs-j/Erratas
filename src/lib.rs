@@ -46,6 +46,7 @@ pub fn scan(path: &str) -> ErratasJob {
                     contents: Vec::new(),
                     content_flag: ErratasContentFlag::Unknown,
                     file_type: RealFileType::Unknown,
+                    bad_language: false,
                     file_sub_type: RealFileSubType::Unknown(types::UnknownSubType::Unknown),
                 },
             }
@@ -61,6 +62,7 @@ fn load_file(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
             contents: fs::read(path)?,
             content_flag: ErratasContentFlag::Scanning,
             file_type: RealFileType::Unknown,
+            bad_language: false,
             file_sub_type: RealFileSubType::Unknown(types::UnknownSubType::Unknown),
         },
     })

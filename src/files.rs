@@ -1233,6 +1233,7 @@ mod tests {
             file_info: FileInfo {
                 contents,
                 content_flag: ErratasContentFlag::Scanning,
+                bad_language: false,
                 file_type: RealFileType::Unknown,
                 file_sub_type: RealFileSubType::Unknown(UnknownSubType::Unknown),
             },

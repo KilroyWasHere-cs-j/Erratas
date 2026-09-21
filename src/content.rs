@@ -38,7 +38,7 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
 
         let text = ocr.get_text()?;
 
-        println!("{}", has_bad_text(&text));
+        erratas_job.file_info.bad_language = has_bad_text(&text);
     }
 
     Ok(erratas_job)
@@ -151,6 +151,7 @@ mod tests {
             file_info: crate::types::FileInfo {
                 contents,
                 content_flag: crate::types::ErratasContentFlag::Scanning,
+                bad_language: false,
                 file_type: RealFileType::Image,
                 file_sub_type: crate::types::RealFileSubType::Unknown(
                     crate::types::UnknownSubType::Unknown,
