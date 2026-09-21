@@ -27,7 +27,13 @@ pub fn scan(path: &str) {
             println!("Begining scanning");
             identify_real_filetype(&mut erratas_job);
             println!("Yara results {:?}", yara_scan(&mut erratas_job));
-            //scan_content(&mut erratas_job).unwrap();
+            // OCR only makes sense on image content -- every other type
+            // (archives, executables, ...) would just fail format-sniffing
+            // in preprocess() every time, so skip the call entirely rather
+            // than pay for it and throw the error away.
+            if erratas_job.file_info.file_type == RealFileType::Image {
+                println!("Content scan results {:?}", scan_content(&mut erratas_job));
+            }
         }
         Err(e) => {
             println!("Error: {e}");
