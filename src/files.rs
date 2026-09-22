@@ -268,6 +268,16 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
+    match check_tiff(&erratas_job.file_info.contents) {
+        RealFileType::Image => {
+            erratas_job.file_info.file_type.push(RealFileType::Image);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Image(ImageSubType::TIFF));
+        }
+        _ => {}
+    }
 
     match check_wav(&erratas_job.file_info.contents) {
         RealFileType::Audio => {
@@ -1138,6 +1148,31 @@ fn check_webp(contents: &[u8]) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+fn check_tiff(contents: &[u8]) -> RealFileType {
+    // TIFF has two magic-byte variants depending on the byte order the
+    // rest of the file's fields are stored in: "II" (little-endian,
+    // "Intel") or "MM" (big-endian, "Motorola"), each followed by the
+    // format's magic number 42, stored in that same byte order.
+    let little_endian = [0x49, 0x49, 0x2A, 0x00];
+    let big_endian = [0x4D, 0x4D, 0x00, 0x2A];
+    if contents.len() >= 4
+        && ((contents[0] == little_endian[0]
+            && contents[1] == little_endian[1]
+            && contents[2] == little_endian[2]
+            && contents[3] == little_endian[3])
+            || (contents[0] == big_endian[0]
+                && contents[1] == big_endian[1]
+                && contents[2] == big_endian[2]
+                && contents[3] == big_endian[3]))
+    {
+        return RealFileType::Image;
+    }
+    if scan_for(contents, &little_endian) || scan_for(contents, &big_endian) {
+        return RealFileType::Image;
+    }
+    return RealFileType::Unknown;
+}
+
 fn check_wav(contents: &[u8]) -> RealFileType {
     // Container is RIFF; the format tag "WAVE" sits at byte offset 8.
     if contents.len() >= 12 {
@@ -1993,5 +2028,50 @@ mod tests {
         contents[0..4].copy_from_slice(&MP3_HEADER);
         contents[MP3_FRAME_SIZE..MP3_FRAME_SIZE + 4].copy_from_slice(&MP3_HEADER);
         assert_eq!(check_mp3(&contents), RealFileType::Audio);
+    }
+
+    // --- check_tiff (#38) -----------------------------------------------
+
+    #[test]
+    fn check_tiff_detects_little_endian_magic() {
+        let contents = vec![0x49, 0x49, 0x2A, 0x00];
+        assert_eq!(check_tiff(&contents), RealFileType::Image);
+    }
+
+    #[test]
+    fn check_tiff_detects_big_endian_magic() {
+        let contents = vec![0x4D, 0x4D, 0x00, 0x2A];
+        assert_eq!(check_tiff(&contents), RealFileType::Image);
+    }
+
+    #[test]
+    fn check_tiff_is_unknown_without_either_magic() {
+        let contents = vec![0x00, 0x00, 0x00, 0x00];
+        assert_eq!(check_tiff(&contents), RealFileType::Unknown);
+    }
+
+    #[test]
+    fn check_tiff_finds_shifted_little_endian_magic_via_fallback_scan() {
+        let mut contents = vec![0x90; 32];
+        contents.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]);
+        assert_eq!(check_tiff(&contents), RealFileType::Image);
+    }
+
+    #[test]
+    fn check_tiff_finds_shifted_big_endian_magic_via_fallback_scan() {
+        let mut contents = vec![0x90; 32];
+        contents.extend_from_slice(&[0x4D, 0x4D, 0x00, 0x2A]);
+        assert_eq!(check_tiff(&contents), RealFileType::Image);
+    }
+
+    #[test]
+    fn identify_type_reports_tiff_end_to_end() {
+        let mut result = result_for(vec![0x49, 0x49, 0x2A, 0x00]);
+        identify_real_filetype(&mut result);
+        assert_eq!(result.file_info.file_type, vec![RealFileType::Image]);
+        assert_eq!(
+            result.file_info.file_sub_type,
+            vec![RealFileSubType::Image(ImageSubType::TIFF)]
+        );
     }
 }

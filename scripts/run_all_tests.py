@@ -228,6 +228,7 @@ FORMAT_FIXTURES: list[FormatFixture] = [
         [(8, bytes([0x57, 0x45, 0x42, 0x50]))],
         None,
     ),
+    ("example.tiff", 64, bytes([0x49, 0x49, 0x2A, 0x00]), [], None),
     # --- audio ---
     (
         "example.wav",
