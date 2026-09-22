@@ -5,7 +5,10 @@ use std::error::Error;
 use std::io::Cursor;
 use tesseract::Tesseract;
 
-use crate::types::{ErratasJob, RealFileType};
+use crate::{
+    consts::STRIKE3_IP,
+    types::{ErratasJob, RealFileType},
+};
 
 // TODO: Scan PII patterns for regex matches.
 
@@ -16,6 +19,17 @@ fn has_bad_text(text: &str) -> bool {
 }
 
 pub fn pii() {}
+
+fn match_against_strike3_black_list(text: &str) -> Vec<String> {
+    let lowercase_text = text.to_lowercase();
+    let mut found = Vec::new();
+    for i in STRIKE3_IP {
+        if lowercase_text.contains(i) {
+            found.push(text.to_string());
+        }
+    }
+    return found;
+}
 
 fn preprocess(bytes: &[u8]) -> Result<GrayImage, Box<dyn Error>> {
     let image = ImageReader::new(Cursor::new(bytes))
@@ -43,6 +57,7 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
         let text = ocr.get_text()?;
 
         erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
     }
 
     Ok(erratas_job)
@@ -158,6 +173,7 @@ mod tests {
                 pii: false,
                 zipbomb: false,
                 malware: false,
+                strike3: Vec::new(),
                 hashmatches: Vec::new(),
                 yara_finds: Vec::new(),
                 file_type: Vec::new(),

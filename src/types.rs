@@ -7,6 +7,7 @@ pub struct FileInfo {
     pub pii: bool,
     pub zipbomb: bool,
     pub malware: bool,
+    pub strike3: Vec<String>,
     pub hashmatches: Vec<String>,
     pub yara_finds: Vec<String>,
     pub file_type: Vec<RealFileType>,
@@ -127,7 +128,7 @@ impl fmt::Display for FileInfo {
             .join(", ");
         write!(
             f,
-            "{} ({}), {} bytes, PII: {}, malware: {}, zipbomb: {}, hash matches: {}, YARA finds: {}, bad language: {}",
+            "{} ({}), {} bytes, PII: {}, malware: {}, zipbomb: {}, hash matches: {}, YARA finds: {}, bad language: {}, strike3: {}",
             file_types,
             file_sub_types,
             self.contents.len(),
@@ -136,7 +137,8 @@ impl fmt::Display for FileInfo {
             self.zipbomb,
             self.hashmatches.len(),
             self.yara_finds.len(),
-            self.bad_language
+            self.bad_language,
+            self.strike3.join(", ")
         )
     }
 }
