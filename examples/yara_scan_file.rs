@@ -35,6 +35,7 @@ fn main() -> ExitCode {
             pii: false,
             zipbomb: false,
             malware: false,
+            strike3: Vec::new(),
             hashmatches: Vec::new(),
             yara_finds: Vec::new(),
             file_type: Vec::new(),
