@@ -1189,27 +1189,123 @@ fn check_ogg(contents: &[u8]) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+// Bitrate lookup tables (kbps), one per MPEG-version/layer combination a
+// frame header can declare. Index 0 ("free" bitrate -- not computable from
+// the header alone) and index 15 ("bad") are both left as 0 and rejected
+// by mp3_frame_size, same as any other reserved field -- see #34.
+const BITRATE_V1_L1: [u16; 16] = [
+    0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0,
+];
+const BITRATE_V1_L2: [u16; 16] = [
+    0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 0,
+];
+const BITRATE_V1_L3: [u16; 16] = [
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+];
+const BITRATE_V2_L1: [u16; 16] = [
+    0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, 0,
+];
+const BITRATE_V2_L23: [u16; 16] = [
+    0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0,
+];
+
+// Sample rates (Hz) per MPEG version; index 3 is reserved in all three.
+const SAMPLE_RATE_MPEG1: [u32; 4] = [44100, 48000, 32000, 0];
+const SAMPLE_RATE_MPEG2: [u32; 4] = [22050, 24000, 16000, 0];
+const SAMPLE_RATE_MPEG25: [u32; 4] = [11025, 12000, 8000, 0];
+
+// Decodes a 4-byte MPEG audio frame header -- starting at a byte pair
+// that's already been confirmed to carry the 11-bit frame sync -- and
+// returns the frame's total size in bytes if every other field (version,
+// layer, bitrate, sample rate) is a legal, non-reserved combination.
+// Rejecting any reserved/invalid field is what tells an incidental
+// sync-shaped byte pair in ordinary binary data (see #34) apart from a
+// byte pair that's actually sitting in front of a real frame header.
+fn mp3_frame_size(bytes: &[u8]) -> Option<usize> {
+    let header = bytes.get(0..4)?;
+    if header[0] != 0xFF || (header[1] & 0xE0) != 0xE0 {
+        return None;
+    }
+
+    let version_bits = (header[1] >> 3) & 0x03;
+    let layer_bits = (header[1] >> 1) & 0x03;
+    let bitrate_index = ((header[2] >> 4) & 0x0F) as usize;
+    let samplerate_index = ((header[2] >> 2) & 0x03) as usize;
+    let padding = ((header[2] >> 1) & 0x01) as u64;
+
+    if layer_bits == 0b00 || version_bits == 0b01 {
+        return None; // reserved layer / reserved version
+    }
+    if samplerate_index == 3 {
+        return None; // reserved sample rate
+    }
+
+    let sample_rate = match version_bits {
+        0b11 => SAMPLE_RATE_MPEG1[samplerate_index],
+        0b10 => SAMPLE_RATE_MPEG2[samplerate_index],
+        _ => SAMPLE_RATE_MPEG25[samplerate_index], // 0b00
+    };
+
+    let bitrate_kbps = match (version_bits, layer_bits) {
+        (0b11, 0b11) => BITRATE_V1_L1[bitrate_index],
+        (0b11, 0b10) => BITRATE_V1_L2[bitrate_index],
+        (0b11, 0b01) => BITRATE_V1_L3[bitrate_index],
+        (_, 0b11) => BITRATE_V2_L1[bitrate_index],
+        (_, _) => BITRATE_V2_L23[bitrate_index],
+    };
+    if bitrate_kbps == 0 {
+        return None; // "free" or "bad" bitrate index
+    }
+
+    let bitrate_bps = bitrate_kbps as u64 * 1000;
+    let frame_size = if layer_bits == 0b11 {
+        // Layer I frames are counted in 4-byte slots.
+        (12 * bitrate_bps / sample_rate as u64 + padding) * 4
+    } else {
+        // Layer II/III frames are counted in 1-byte slots.
+        144 * bitrate_bps / sample_rate as u64 + padding
+    };
+
+    if frame_size < 4 {
+        return None; // too small to hold even another header -- not real
+    }
+    Some(frame_size as usize)
+}
+
+// A single frame-sync match is common by chance in ordinary binary data
+// (11 bits, see #34) -- this only trusts it once a second, independently
+// valid frame header shows up at exactly the byte offset the first
+// header's own declared size implies. Real (even VBR) MP3 streams satisfy
+// this trivially; incidental byte noise essentially never does.
+fn has_consecutive_mp3_frames(contents: &[u8], start: usize) -> bool {
+    let Some(first) = contents.get(start..) else {
+        return false;
+    };
+    let Some(first_size) = mp3_frame_size(first) else {
+        return false;
+    };
+    let Some(next_start) = start.checked_add(first_size) else {
+        return false;
+    };
+    let Some(next) = contents.get(next_start..) else {
+        return false;
+    };
+    mp3_frame_size(next).is_some()
+}
+
 fn check_mp3(contents: &[u8]) -> RealFileType {
     // MP3 has no single reliable signature: it's either an ID3v2 tag up
-    // front, or -- lacking a tag -- a floating frame-sync bit pattern
-    // (11 set bits) at the very start of the first audio frame.
+    // front, or -- lacking a tag -- a chain of frame headers whose sizes
+    // line up (see has_consecutive_mp3_frames above).
     if contents.len() >= 3 && contents[0] == b'I' && contents[1] == b'D' && contents[2] == b'3' {
-        return RealFileType::Audio;
-    }
-    if contents.len() >= 2 && contents[0] == 0xFF && (contents[1] & 0xE0) == 0xE0 {
         return RealFileType::Audio;
     }
     if scan_for(contents, b"ID3") {
         return RealFileType::Audio;
     }
-    // The frame-sync check is a bitmask, not an exact byte match, so it
-    // needs its own scan rather than reusing scan_for -- and being only
-    // 11 significant bits, it's the least reliable fallback of the bunch.
-    if contents.len() >= 2 {
-        for i in 0..=(contents.len() - 2) {
-            if contents[i] == 0xFF && (contents[i + 1] & 0xE0) == 0xE0 {
-                return RealFileType::Audio;
-            }
+    for i in 0..contents.len() {
+        if has_consecutive_mp3_frames(contents, i) {
+            return RealFileType::Audio;
         }
     }
     return RealFileType::Unknown;
@@ -1733,23 +1829,17 @@ mod tests {
 
     #[test]
     fn identify_type_reports_doc_end_to_end() {
-        // cfb_with_stream's 0xFF-filled FREESECT padding happens to trip
-        // check_mp3's frame-sync fallback (0xFF followed by a byte with its
-        // top 3 bits set), which is the least reliable of the fallback scans
-        // by design (see its own comment) -- a known false positive on this
-        // synthetic fixture, not a real audio match.
+        // cfb_with_stream's 0xFF-filled FREESECT padding used to trip
+        // check_mp3's frame-sync fallback on a single incidental 0xFF byte
+        // pair -- fixed in #34 by requiring two consecutive, independently
+        // valid frame headers, which a run of plain 0xFF padding can't
+        // produce (byte2 == 0xFF decodes to bitrate index 15, "bad").
         let mut result = result_for(cfb_with_stream("WordDocument"));
         identify_real_filetype(&mut result);
-        assert_eq!(
-            result.file_info.file_type,
-            vec![RealFileType::Document, RealFileType::Audio]
-        );
+        assert_eq!(result.file_info.file_type, vec![RealFileType::Document]);
         assert_eq!(
             result.file_info.file_sub_type,
-            vec![
-                RealFileSubType::Document(DocumentSubType::DOC),
-                RealFileSubType::Audio(AudioSubType::MP3)
-            ]
+            vec![RealFileSubType::Document(DocumentSubType::DOC)]
         );
     }
 
@@ -1797,5 +1887,111 @@ mod tests {
         let mut contents = cfb_with_stream("WordDocument");
         contents[30..32].copy_from_slice(&12u16.to_le_bytes()); // 4096-byte sectors
         assert_eq!(ole_cfb_subtype(&contents), DocumentSubType::OLECFB);
+    }
+
+    // --- check_mp3 / mp3_frame_size (#34) -----------------------------
+    // A valid MPEG1 Layer III header: 0xFF 0xFB (sync + version + layer +
+    // protection), 0x10 (bitrate index 1 = 32kbps, sample rate index 0 =
+    // 44100Hz, no padding), 0x00 (unused by these checks). Its declared
+    // frame size is 144 * 32000 / 44100 = 104 bytes (floor).
+    const MP3_HEADER: [u8; 4] = [0xFF, 0xFB, 0x10, 0x00];
+    const MP3_FRAME_SIZE: usize = 104;
+
+    #[test]
+    fn mp3_frame_size_computes_correct_size_for_a_known_header() {
+        assert_eq!(mp3_frame_size(&MP3_HEADER), Some(MP3_FRAME_SIZE));
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_too_short_a_slice() {
+        assert_eq!(mp3_frame_size(&MP3_HEADER[..3]), None);
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_missing_sync() {
+        let mut header = MP3_HEADER;
+        header[0] = 0x00;
+        assert_eq!(mp3_frame_size(&header), None);
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_reserved_layer() {
+        // Layer bits (header[1] bits 2-1) set to 00 -- reserved.
+        let mut header = MP3_HEADER;
+        header[1] = 0xF9;
+        assert_eq!(mp3_frame_size(&header), None);
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_reserved_version() {
+        // Version bits (header[1] bits 4-3) set to 01 -- reserved.
+        let mut header = MP3_HEADER;
+        header[1] = 0xEB;
+        assert_eq!(mp3_frame_size(&header), None);
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_bad_bitrate_index() {
+        // Bitrate index 15 ("bad") -- top nibble of header[2].
+        let mut header = MP3_HEADER;
+        header[2] = 0xF0;
+        assert_eq!(mp3_frame_size(&header), None);
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_free_bitrate_index() {
+        // Bitrate index 0 ("free", not computable from the header alone).
+        let mut header = MP3_HEADER;
+        header[2] = 0x00;
+        assert_eq!(mp3_frame_size(&header), None);
+    }
+
+    #[test]
+    fn mp3_frame_size_rejects_reserved_samplerate() {
+        // Sample rate index 3 -- reserved in every MPEG version.
+        let mut header = MP3_HEADER;
+        header[2] = 0x1C;
+        assert_eq!(mp3_frame_size(&header), None);
+    }
+
+    #[test]
+    fn has_consecutive_mp3_frames_true_when_second_header_lines_up() {
+        let mut contents = vec![0u8; MP3_FRAME_SIZE + MP3_HEADER.len()];
+        contents[0..4].copy_from_slice(&MP3_HEADER);
+        contents[MP3_FRAME_SIZE..MP3_FRAME_SIZE + 4].copy_from_slice(&MP3_HEADER);
+        assert!(has_consecutive_mp3_frames(&contents, 0));
+    }
+
+    #[test]
+    fn has_consecutive_mp3_frames_false_when_second_header_missing() {
+        // Only room for the first header -- nothing at the computed offset.
+        let mut contents = vec![0u8; MP3_FRAME_SIZE];
+        contents[0..4].copy_from_slice(&MP3_HEADER);
+        assert!(!has_consecutive_mp3_frames(&contents, 0));
+    }
+
+    #[test]
+    fn check_mp3_ignores_a_single_incidental_frame_sync_byte_pair() {
+        // The exact regression #34 reports: one sync-shaped byte pair
+        // with nothing chaining after it must not be enough on its own.
+        let mut contents = vec![0u8; 64];
+        contents[0] = 0xFF;
+        contents[1] = 0xE6; // top 3 bits set, matches the old loose check
+        assert_eq!(check_mp3(&contents), RealFileType::Unknown);
+    }
+
+    #[test]
+    fn check_mp3_detects_a_real_id3_tagged_file() {
+        let mut contents = b"ID3".to_vec();
+        contents.extend_from_slice(&[0u8; 61]);
+        assert_eq!(check_mp3(&contents), RealFileType::Audio);
+    }
+
+    #[test]
+    fn check_mp3_detects_two_chained_frame_headers_with_no_id3_tag() {
+        let mut contents = vec![0u8; MP3_FRAME_SIZE + MP3_HEADER.len()];
+        contents[0..4].copy_from_slice(&MP3_HEADER);
+        contents[MP3_FRAME_SIZE..MP3_FRAME_SIZE + 4].copy_from_slice(&MP3_HEADER);
+        assert_eq!(check_mp3(&contents), RealFileType::Audio);
     }
 }

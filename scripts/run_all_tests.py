@@ -245,7 +245,17 @@ FORMAT_FIXTURES: list[FormatFixture] = [
         [],
         None,
     ),
-    ("example_raw.mp3", 64, bytes([0xFF, 0xFB, 0x90, 0x00]), [], None),
+    # check_mp3's frame-sync fallback now requires two consecutive, valid
+    # frame headers (see #34) -- this header (MPEG1 Layer III, 32kbps,
+    # 44100Hz, no padding: 0xFF 0xFB 0x10 0x00) computes a 104-byte frame
+    # size, so a second identical header is poked in at that exact offset.
+    (
+        "example_raw.mp3",
+        128,
+        bytes([0xFF, 0xFB, 0x10, 0x00]),
+        [(104, bytes([0xFF, 0xFB, 0x10, 0x00]))],
+        None,
+    ),
     # --- video ---
     (
         "example.mp4",
