@@ -13,6 +13,7 @@ the file types Erratas already classifies (`src/types.rs`'s
 | `pdf_documents.yar`            | PDF                                           |
 | `scripts_and_lolbins.yar`      | Generic script/dropper indicators (any file)  |
 | `archives_and_installers.yar`  | ZIP/RAR/7z/TAR, MSI installers, LNK shortcuts |
+| `shellcode.yar`                | Embedded shellcode payloads (any file, #5)    |
 .
 
 ## Caveats
@@ -20,7 +21,9 @@ the file types Erratas already classifies (`src/types.rs`'s
 - These are **teaching examples**, not a production detection set. They're
   narrow, string/pattern-based, and will both miss real malware and flag
   legitimate files (e.g. `elf_ld_preload_hijack` will match any binary that
-  merely mentions `LD_PRELOAD` in a comment or log string).
+  merely mentions `LD_PRELOAD` in a comment or log string; `shellcode_nop_sled`
+  will match any long run of 0x90 bytes regardless of why it's there, which
+  includes some legitimate alignment padding).
 - A few PE/ELF rules use yara-x's `pe`/`elf`/`math` modules
   (`pe.imports(...)`, `pe.sections[i]`, `math.entropy(...)`) - these mirror
   the classic YARA module APIs and were compile-checked against yara-x
