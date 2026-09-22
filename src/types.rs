@@ -45,6 +45,7 @@ pub enum ImageSubType {
     GIF,
     BMP,
     WEBP,
+    TIFF,
 }
 
 #[derive(Debug, PartialEq)]
