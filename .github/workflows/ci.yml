@@ -17,6 +17,16 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Tesseract/Leptonica system libraries
+        # The `tesseract` crate (src/content.rs's OCR path) links against
+        # the system libtesseract/libleptonica via pkg-config at build
+        # time -- without these, leptonica-sys's build script panics
+        # because `pkg-config --libs --cflags lept` can't find lept.pc.
+        # See #31.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libtesseract-dev libleptonica-dev
+
       - name: Cache cargo registry and build output
         uses: actions/cache@v4
         with:
