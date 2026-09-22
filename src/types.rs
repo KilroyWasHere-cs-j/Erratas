@@ -3,31 +3,20 @@ use std::fmt;
 #[derive(Debug)]
 pub struct FileInfo {
     pub contents: Vec<u8>,
-    pub content_flag: ErratasContentFlag,
     pub bad_language: bool,
-    pub file_type: RealFileType,
-    pub file_sub_type: RealFileSubType,
+    pub pii: bool,
+    pub zipbomb: bool,
+    pub malware: bool,
+    pub hashmatches: Vec<String>,
+    pub yara_finds: Vec<String>,
+    pub file_type: Vec<RealFileType>,
+    pub file_sub_type: Vec<RealFileSubType>,
 }
 
 #[derive(Debug)]
 pub struct ErratasJob {
     pub file_info: FileInfo,
     //pub yara_results: Vec<String>,
-}
-
-#[derive(Debug)]
-pub enum ErratasContentFlag {
-    AllGood,
-    BandedFileType,
-    PII,
-    Malware,
-    Archive,
-    ZipBomb,
-    HashMatching,
-    YARA,
-    Profanity,
-    Scanning,
-    Unknown,
 }
 
 #[derive(Debug, PartialEq)]
@@ -124,13 +113,29 @@ pub enum RealFileSubType {
 // tiny file.
 impl fmt::Display for FileInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let file_types = self
+            .file_type
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let file_sub_types = self
+            .file_sub_type
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         write!(
             f,
-            "{} ({}), {} bytes, flag: {}, bad language: {}",
-            self.file_type,
-            self.file_sub_type,
+            "{} ({}), {} bytes, PII: {}, malware: {}, zipbomb: {}, hash matches: {}, YARA finds: {}, bad language: {}",
+            file_types,
+            file_sub_types,
             self.contents.len(),
-            self.content_flag,
+            self.pii,
+            self.malware,
+            self.zipbomb,
+            self.hashmatches.len(),
+            self.yara_finds.len(),
             self.bad_language
         )
     }
@@ -139,25 +144,6 @@ impl fmt::Display for FileInfo {
 impl fmt::Display for ErratasJob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.file_info)
-    }
-}
-
-impl fmt::Display for ErratasContentFlag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            ErratasContentFlag::AllGood => "all good",
-            ErratasContentFlag::BandedFileType => "banded file type",
-            ErratasContentFlag::PII => "PII",
-            ErratasContentFlag::Malware => "malware",
-            ErratasContentFlag::Archive => "archive",
-            ErratasContentFlag::ZipBomb => "zip bomb",
-            ErratasContentFlag::HashMatching => "hash matching",
-            ErratasContentFlag::YARA => "YARA",
-            ErratasContentFlag::Profanity => "profanity",
-            ErratasContentFlag::Scanning => "scanning",
-            ErratasContentFlag::Unknown => "unknown",
-        };
-        write!(f, "{label}")
     }
 }
 

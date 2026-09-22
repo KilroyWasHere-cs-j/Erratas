@@ -28,7 +28,11 @@ fn preprocess(bytes: &[u8]) -> Result<GrayImage, Box<dyn Error>> {
 }
 
 pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box<dyn Error>> {
-    if erratas_job.file_info.file_type == RealFileType::Image {
+    if erratas_job
+        .file_info
+        .file_type
+        .contains(&RealFileType::Image)
+    {
         let gray_image = preprocess(&erratas_job.file_info.contents)?;
         let mut ocr = Tesseract::new(None, Some("eng"))?;
         let frame = gray_image.as_raw();
@@ -150,12 +154,14 @@ mod tests {
         let mut job = ErratasJob {
             file_info: crate::types::FileInfo {
                 contents,
-                content_flag: crate::types::ErratasContentFlag::Scanning,
                 bad_language: false,
-                file_type: RealFileType::Image,
-                file_sub_type: crate::types::RealFileSubType::Unknown(
-                    crate::types::UnknownSubType::Unknown,
-                ),
+                pii: false,
+                zipbomb: false,
+                malware: false,
+                hashmatches: Vec::new(),
+                yara_finds: Vec::new(),
+                file_type: Vec::new(),
+                file_sub_type: Vec::new(),
             },
         };
         scan_content(&mut job).ok()?;

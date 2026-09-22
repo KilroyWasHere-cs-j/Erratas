@@ -11,7 +11,7 @@ use std::fs;
 use crate::{
     content::scan_content,
     malware::yara_scan,
-    types::{ErratasContentFlag, ErratasJob, FileInfo, RealFileSubType, RealFileType},
+    types::{ErratasJob, FileInfo},
 };
 
 pub mod consts;
@@ -44,10 +44,14 @@ pub fn scan(path: &str) -> ErratasJob {
             ErratasJob {
                 file_info: FileInfo {
                     contents: Vec::new(),
-                    content_flag: ErratasContentFlag::Unknown,
-                    file_type: RealFileType::Unknown,
                     bad_language: false,
-                    file_sub_type: RealFileSubType::Unknown(types::UnknownSubType::Unknown),
+                    pii: false,
+                    zipbomb: false,
+                    malware: false,
+                    hashmatches: Vec::new(),
+                    yara_finds: Vec::new(),
+                    file_type: Vec::new(),
+                    file_sub_type: Vec::new(),
                 },
             }
         }
@@ -57,13 +61,18 @@ pub fn scan(path: &str) -> ErratasJob {
 fn load_file(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
     // TODO: Sanitize file path.
 
-    Ok(ErratasJob {
+    let erratas_job = ErratasJob {
         file_info: FileInfo {
             contents: fs::read(path)?,
-            content_flag: ErratasContentFlag::Scanning,
-            file_type: RealFileType::Unknown,
             bad_language: false,
-            file_sub_type: RealFileSubType::Unknown(types::UnknownSubType::Unknown),
+            pii: false,
+            zipbomb: false,
+            malware: false,
+            hashmatches: Vec::new(),
+            yara_finds: Vec::new(),
+            file_type: Vec::new(),
+            file_sub_type: Vec::new(),
         },
-    })
+    };
+    Ok(erratas_job)
 }

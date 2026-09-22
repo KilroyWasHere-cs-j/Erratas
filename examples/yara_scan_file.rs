@@ -6,9 +6,7 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use erratas::types::{
-    ErratasContentFlag, ErratasJob, FileInfo, RealFileSubType, RealFileType, UnknownSubType,
-};
+use erratas::types::{ErratasJob, FileInfo};
 
 fn main() -> ExitCode {
     let mut args = env::args();
@@ -33,10 +31,14 @@ fn main() -> ExitCode {
     let mut result = ErratasJob {
         file_info: FileInfo {
             contents,
-            content_flag: ErratasContentFlag::Scanning,
             bad_language: false,
-            file_type: RealFileType::Unknown,
-            file_sub_type: RealFileSubType::Unknown(UnknownSubType::Unknown),
+            pii: false,
+            zipbomb: false,
+            malware: false,
+            hashmatches: Vec::new(),
+            yara_finds: Vec::new(),
+            file_type: Vec::new(),
+            file_sub_type: Vec::new(),
         },
     };
 
