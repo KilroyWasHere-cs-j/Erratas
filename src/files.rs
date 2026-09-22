@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use crate::types::{
-    ArchiveSubType, AudioSubType, DocumentSubType, ErratasContentFlag, ErratasJob,
-    ExecutableSubType, ImageSubType, RealFileSubType, RealFileType, UnknownSubType, VideoSubType,
+    ArchiveSubType, AudioSubType, DocumentSubType, ErratasJob, ExecutableSubType, ImageSubType,
+    RealFileSubType, RealFileType, VideoSubType,
 };
 
 pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
@@ -12,19 +12,26 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         } else {
             ExecutableSubType::ELF
         };
-        erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-        erratas_job.file_info.file_type = RealFileType::LinuxExecutable;
-        erratas_job.file_info.file_sub_type = RealFileSubType::Executable(file_sub_type);
-        return erratas_job;
+        erratas_job
+            .file_info
+            .file_type
+            .push(RealFileType::LinuxExecutable);
+        erratas_job
+            .file_info
+            .file_sub_type
+            .push(RealFileSubType::Executable(file_sub_type));
     }
 
     match check_winexe(&erratas_job.file_info.contents) {
         Ok(RealFileType::WinExecutable) => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::WinExecutable;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Executable(ExecutableSubType::PE);
-            return erratas_job;
+            erratas_job
+                .file_info
+                .file_type
+                .push(RealFileType::WinExecutable);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Executable(ExecutableSubType::PE));
         }
         Ok(_) => {}
         Err(e) => {
@@ -34,43 +41,53 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
 
     match check_dll(&erratas_job.file_info.contents) {
         RealFileType::WinExecutable => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::WinExecutable;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Executable(ExecutableSubType::DLL);
-            return erratas_job;
+            erratas_job
+                .file_info
+                .file_type
+                .push(RealFileType::WinExecutable);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Executable(ExecutableSubType::DLL));
         }
         _ => {}
     }
 
     match check_lnk(&erratas_job.file_info.contents) {
         RealFileType::WinExecutable => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::WinExecutable;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Executable(ExecutableSubType::LNK);
-            return erratas_job;
+            erratas_job
+                .file_info
+                .file_type
+                .push(RealFileType::WinExecutable);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Executable(ExecutableSubType::LNK));
         }
         _ => {}
     }
 
     match check_macho(&erratas_job.file_info.contents) {
         RealFileType::MacExecutable => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::MacExecutable;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Executable(ExecutableSubType::MachO);
-            return erratas_job;
+            erratas_job
+                .file_info
+                .file_type
+                .push(RealFileType::MacExecutable);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Executable(ExecutableSubType::MachO));
         }
         _ => {}
     }
 
     match check_dmg(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::DMG);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::DMG));
         }
         _ => {}
     }
@@ -80,226 +97,261 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     // it's actually an OOXML document.
     match check_ooxml(&erratas_job.file_info.contents) {
         RealFileType::Document => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Document;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Document(ooxml_subtype(&erratas_job.file_info.contents));
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(ooxml_subtype(
+                    &erratas_job.file_info.contents,
+                )));
         }
         _ => {}
     }
 
     match check_zip(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::ZIP);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::ZIP));
         }
         _ => {}
     }
 
     match check_rar(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::RAR);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::RAR));
         }
         _ => {}
     }
     match check_7z(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::SEVENZ);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::SEVENZ));
         }
         _ => {}
     }
 
     match check_cab(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::CAB);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::CAB));
         }
         _ => {}
     }
 
     match check_tar(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::TAR);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::TAR));
         }
         _ => {}
     }
 
     match check_iso(&erratas_job.file_info.contents) {
         RealFileType::Archive => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Archive;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Archive(ArchiveSubType::ISO);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Archive);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Archive(ArchiveSubType::ISO));
         }
         RealFileType::WinExecutable => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::WinExecutable;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Executable(ExecutableSubType::PE);
-            return erratas_job;
+            erratas_job
+                .file_info
+                .file_type
+                .push(RealFileType::WinExecutable);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Executable(ExecutableSubType::PE));
         }
         _ => {}
     }
 
     match check_pdf(&erratas_job.file_info.contents) {
         RealFileType::Document => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Document;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Document(DocumentSubType::PDF);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(DocumentSubType::PDF));
         }
         _ => {}
     }
 
     match check_ole_cfb(&erratas_job.file_info.contents) {
         RealFileType::Document => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Document;
-            erratas_job.file_info.file_sub_type =
-                RealFileSubType::Document(ole_cfb_subtype(&erratas_job.file_info.contents));
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(ole_cfb_subtype(
+                    &erratas_job.file_info.contents,
+                )));
         }
         _ => {}
     }
 
     match check_chm(&erratas_job.file_info.contents) {
         RealFileType::Document => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Document;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Document(DocumentSubType::CHM);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(DocumentSubType::CHM));
         }
         _ => {}
     }
 
     match check_png(&erratas_job.file_info.contents) {
         RealFileType::Image => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Image;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::PNG);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Image);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Image(ImageSubType::PNG));
         }
         _ => {}
     }
     match check_jpeg(&erratas_job.file_info.contents) {
         RealFileType::Image => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Image;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::JPEG);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Image);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Image(ImageSubType::JPEG));
         }
         _ => {}
     }
     match check_gif(&erratas_job.file_info.contents) {
         RealFileType::Image => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Image;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::GIF);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Image);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Image(ImageSubType::GIF));
         }
         _ => {}
     }
     match check_bmp(&erratas_job.file_info.contents) {
         RealFileType::Image => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Image;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::BMP);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Image);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Image(ImageSubType::BMP));
         }
         _ => {}
     }
     match check_webp(&erratas_job.file_info.contents) {
         RealFileType::Image => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Image;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Image(ImageSubType::WEBP);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Image);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Image(ImageSubType::WEBP));
         }
         _ => {}
     }
 
     match check_wav(&erratas_job.file_info.contents) {
         RealFileType::Audio => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Audio;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::WAV);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Audio);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Audio(AudioSubType::WAV));
         }
         _ => {}
     }
     match check_flac(&erratas_job.file_info.contents) {
         RealFileType::Audio => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Audio;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::FLAC);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Audio);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Audio(AudioSubType::FLAC));
         }
         _ => {}
     }
     match check_ogg(&erratas_job.file_info.contents) {
         RealFileType::Audio => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Audio;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::OGG);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Audio);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Audio(AudioSubType::OGG));
         }
         _ => {}
     }
     match check_mp3(&erratas_job.file_info.contents) {
         RealFileType::Audio => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Audio;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Audio(AudioSubType::MP3);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Audio);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Audio(AudioSubType::MP3));
         }
         _ => {}
     }
 
     match check_mp4(&erratas_job.file_info.contents) {
         RealFileType::Video => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Video;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Video(VideoSubType::MP4);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Video);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Video(VideoSubType::MP4));
         }
         _ => {}
     }
     match check_webm(&erratas_job.file_info.contents) {
         RealFileType::Video => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Video;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Video(VideoSubType::WEBM);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Video);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Video(VideoSubType::WEBM));
         }
         _ => {}
     }
     match check_avi(&erratas_job.file_info.contents) {
         RealFileType::Video => {
-            erratas_job.file_info.content_flag = ErratasContentFlag::BandedFileType;
-            erratas_job.file_info.file_type = RealFileType::Video;
-            erratas_job.file_info.file_sub_type = RealFileSubType::Video(VideoSubType::AVI);
-            return erratas_job;
+            erratas_job.file_info.file_type.push(RealFileType::Video);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Video(VideoSubType::AVI));
         }
         _ => {}
     }
 
-    erratas_job.file_info.content_flag = ErratasContentFlag::Unknown;
-    erratas_job.file_info.file_type = RealFileType::Unknown;
-    erratas_job.file_info.file_sub_type = RealFileSubType::Unknown(UnknownSubType::Unknown);
+    if erratas_job.file_info.file_type.len() == 0 {
+        erratas_job.file_info.file_type.push(RealFileType::Unknown);
+    }
+    if erratas_job.file_info.file_sub_type.len() == 0 {
+        erratas_job
+            .file_info
+            .file_sub_type
+            .push(RealFileSubType::Unknown(
+                crate::types::UnknownSubType::Unknown,
+            ));
+    }
     return erratas_job;
 }
 
@@ -1232,10 +1284,14 @@ mod tests {
         ErratasJob {
             file_info: FileInfo {
                 contents,
-                content_flag: ErratasContentFlag::Scanning,
                 bad_language: false,
-                file_type: RealFileType::Unknown,
-                file_sub_type: RealFileSubType::Unknown(UnknownSubType::Unknown),
+                pii: false,
+                zipbomb: false,
+                malware: false,
+                hashmatches: Vec::new(),
+                yara_finds: Vec::new(),
+                file_type: Vec::new(),
+                file_sub_type: Vec::new(),
             },
         }
     }
@@ -1304,10 +1360,13 @@ mod tests {
         contents.extend_from_slice(&elf_header(3, false));
         let mut result = result_for(contents);
         identify_real_filetype(&mut result);
-        assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
+        assert_eq!(
+            result.file_info.file_type,
+            vec![RealFileType::LinuxExecutable]
+        );
         assert_eq!(
             result.file_info.file_sub_type,
-            RealFileSubType::Executable(ExecutableSubType::SO)
+            vec![RealFileSubType::Executable(ExecutableSubType::SO)]
         );
     }
 
@@ -1315,10 +1374,13 @@ mod tests {
     fn identify_type_reports_elf_executable() {
         let mut result = result_for(elf_header(2, false));
         identify_real_filetype(&mut result);
-        assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
+        assert_eq!(
+            result.file_info.file_type,
+            vec![RealFileType::LinuxExecutable]
+        );
         assert_eq!(
             result.file_info.file_sub_type,
-            RealFileSubType::Executable(ExecutableSubType::ELF)
+            vec![RealFileSubType::Executable(ExecutableSubType::ELF)]
         );
     }
 
@@ -1326,10 +1388,13 @@ mod tests {
     fn identify_type_reports_shared_object() {
         let mut result = result_for(elf_header(3, false));
         identify_real_filetype(&mut result);
-        assert_eq!(result.file_info.file_type, RealFileType::LinuxExecutable);
+        assert_eq!(
+            result.file_info.file_type,
+            vec![RealFileType::LinuxExecutable]
+        );
         assert_eq!(
             result.file_info.file_sub_type,
-            RealFileSubType::Executable(ExecutableSubType::SO)
+            vec![RealFileSubType::Executable(ExecutableSubType::SO)]
         );
     }
 
@@ -1536,12 +1601,22 @@ mod tests {
 
     #[test]
     fn identify_type_reports_docx_end_to_end() {
+        // A .docx is a real ZIP archive underneath, so with identify_real_filetype
+        // no longer short-circuiting on the first match, this legitimately
+        // matches both check_ooxml and check_zip -- exactly the polyglot
+        // detection issue #25 asked for.
         let mut result = result_for(ooxml_bytes(b"word/document.xml"));
         identify_real_filetype(&mut result);
-        assert_eq!(result.file_info.file_type, RealFileType::Document);
+        assert_eq!(
+            result.file_info.file_type,
+            vec![RealFileType::Document, RealFileType::Archive]
+        );
         assert_eq!(
             result.file_info.file_sub_type,
-            RealFileSubType::Document(DocumentSubType::DOCX)
+            vec![
+                RealFileSubType::Document(DocumentSubType::DOCX),
+                RealFileSubType::Archive(ArchiveSubType::ZIP)
+            ]
         );
     }
 
@@ -1657,12 +1732,23 @@ mod tests {
 
     #[test]
     fn identify_type_reports_doc_end_to_end() {
+        // cfb_with_stream's 0xFF-filled FREESECT padding happens to trip
+        // check_mp3's frame-sync fallback (0xFF followed by a byte with its
+        // top 3 bits set), which is the least reliable of the fallback scans
+        // by design (see its own comment) -- a known false positive on this
+        // synthetic fixture, not a real audio match.
         let mut result = result_for(cfb_with_stream("WordDocument"));
         identify_real_filetype(&mut result);
-        assert_eq!(result.file_info.file_type, RealFileType::Document);
+        assert_eq!(
+            result.file_info.file_type,
+            vec![RealFileType::Document, RealFileType::Audio]
+        );
         assert_eq!(
             result.file_info.file_sub_type,
-            RealFileSubType::Document(DocumentSubType::DOC)
+            vec![
+                RealFileSubType::Document(DocumentSubType::DOC),
+                RealFileSubType::Audio(AudioSubType::MP3)
+            ]
         );
     }
 
