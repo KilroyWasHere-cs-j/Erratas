@@ -22,10 +22,14 @@ strike3/ as one combined suite:
   3. strike3 word list        -- was strike3/generate_images.sh +
                                  test_strike3.sh + run_erratas.sh combined:
                                  generates one block-letter-on-black PNG per
-                                 term in strike3_ips.txt, verifies Tesseract
-                                 reads each one back correctly, then runs
-                                 erratas against each and checks the
-                                 strike3 field in its output actually fired.
+                                 term in src/consts.rs's STRIKE3_IP (the
+                                 single source of truth for the blocklist --
+                                 not a separate wordlist file, which drifted
+                                 out of sync with it in practice), verifies
+                                 Tesseract reads each one back correctly,
+                                 then runs erratas against each and checks
+                                 the strike3 field in its output actually
+                                 fired.
 
 Each phase reports its own pass/fail tally; the script's exit code is
 nonzero if anything, anywhere, failed.
@@ -35,6 +39,7 @@ Usage: python3 scripts/run_all_tests.py
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -45,7 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOURCES_DIR = REPO_ROOT / "resources"
 YARA_EXAMPLES_DIR = RESOURCES_DIR / "yara_examples"
 STRIKE3_DIR = REPO_ROOT / "strike3"
-STRIKE3_WORDLIST = REPO_ROOT / "strike3_ips.txt"
+CONSTS_RS = REPO_ROOT / "src" / "consts.rs"
 FONT_PATH = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
 
 GREEN = "\033[0;32m"
@@ -389,17 +394,25 @@ def generate_strike3_images(terms: list[str]) -> list[tuple[str, Path]]:
     return out
 
 
+def load_strike3_terms() -> list[str]:
+    """Reads STRIKE3_IP directly out of src/consts.rs -- the single source
+    of truth for the blocklist -- rather than a separate wordlist file,
+    which already drifted out of sync with it once (consts.rs gained
+    "blacked" and "deeper" that a standalone list never picked up)."""
+    text = CONSTS_RS.read_text()
+    match = re.search(r"STRIKE3_IP:\s*&\[&str\]\s*=\s*&\[(.*?)\];", text, re.DOTALL)
+    if not match:
+        raise RuntimeError(f"could not find STRIKE3_IP in {CONSTS_RS}")
+    return re.findall(r'"([^"]*)"', match.group(1))
+
+
 def phase_strike3(bin_path: Path) -> bool:
     header("Phase 3: strike3 word list")
-    if not STRIKE3_WORDLIST.exists():
-        print(f"skipping: {STRIKE3_WORDLIST} not present")
+    terms = load_strike3_terms()
+    if not terms:
+        print(f"skipping: no terms found in {CONSTS_RS}'s STRIKE3_IP")
         return True
 
-    terms = [
-        line.strip()
-        for line in STRIKE3_WORDLIST.read_text().splitlines()
-        if line.strip()
-    ]
     fixtures = generate_strike3_images(terms)
 
     ocr_tally = Tally("strike3 OCR readability")
