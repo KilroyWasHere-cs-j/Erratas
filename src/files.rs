@@ -582,13 +582,21 @@ fn check_ooxml(contents: &[u8]) -> RealFileType {
 // Only called once check_ooxml has already confirmed the file is some
 // kind of OOXML package -- picks out which one by scanning for the entry
 // name each format's package always carries at a fixed path. Falls back
-// to the generic OOXML variant if none of the three match (a format this
+// to the generic OOXML variant if none of these match (a format this
 // doesn't know about yet, or a package that's missing that entry).
 fn ooxml_subtype(contents: &[u8]) -> DocumentSubType {
     if scan_for(contents, b"word/document.xml") {
         return DocumentSubType::DOCX;
     }
     if scan_for(contents, b"xl/workbook.xml") {
+        return DocumentSubType::XLSX;
+    }
+    // .xlsb (Excel Binary Workbook) is still an OOXML zip package, but
+    // swaps every XML part for a binary (BIFF12) one -- its main part is
+    // xl/workbook.bin, not xl/workbook.xml. Bucketed under XLSX rather
+    // than its own subtype, same as this function already does for the
+    // other three families.
+    if scan_for(contents, b"xl/workbook.bin") {
         return DocumentSubType::XLSX;
     }
     if scan_for(contents, b"ppt/presentation.xml") {
@@ -1711,6 +1719,14 @@ mod tests {
     fn ooxml_subtype_detects_xlsx() {
         assert_eq!(
             ooxml_subtype(&ooxml_bytes(b"xl/workbook.xml")),
+            DocumentSubType::XLSX
+        );
+    }
+
+    #[test]
+    fn ooxml_subtype_detects_xlsb_as_xlsx() {
+        assert_eq!(
+            ooxml_subtype(&ooxml_bytes(b"xl/workbook.bin")),
             DocumentSubType::XLSX
         );
     }

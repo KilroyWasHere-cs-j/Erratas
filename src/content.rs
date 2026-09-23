@@ -5,9 +5,19 @@ use std::error::Error;
 use std::io::Cursor;
 use tesseract::Tesseract;
 
+use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
+use docx_rs::{
+    DocumentChild, ParagraphChild, RunChild, Table, TableCellContent, TableChild, TableRowChild,
+    read_docx,
+};
+use quick_xml::Reader;
+use quick_xml::events::Event;
+use std::io::Read;
+use zip::ZipArchive;
+
 use crate::{
     consts::STRIKE3_IP,
-    types::{ErratasJob, RealFileType},
+    types::{DocumentSubType::PDF, ErratasJob, RealFileType},
 };
 
 // TODO: Scan PII patterns for regex matches.
@@ -15,7 +25,7 @@ use crate::{
 // TODO: Scan profanity patterns for word-list matches.
 
 fn has_bad_text(text: &str) -> bool {
-    text.is(Type::PROFANE | Type::OFFENSIVE)
+    text.is(Type::PROFANE | Type::OFFENSIVE | Type::SEXUAL)
 }
 
 pub fn pii() {}
@@ -41,25 +51,202 @@ fn preprocess(bytes: &[u8]) -> Result<GrayImage, Box<dyn Error>> {
     Ok(gray_image)
 }
 
+fn extract_text_from_image(bytes: &[u8]) -> Result<String, Box<dyn Error>> {
+    let gray_image = preprocess(bytes)?;
+    let mut ocr = Tesseract::new(None, Some("eng"))?;
+    let frame = gray_image.as_raw();
+    let width = gray_image.width() as i32;
+    let height = gray_image.height() as i32;
+    ocr = ocr.set_frame(frame, width, height, 1, width)?;
+
+    let text = ocr.get_text()?;
+    Ok(text)
+}
+
+fn extract_text_from_docx(bytes: &[u8]) -> Result<String, docx_rs::ReaderError> {
+    let docx = read_docx(bytes)?;
+    let mut text = String::new();
+
+    for child in &docx.document.children {
+        match child {
+            DocumentChild::Paragraph(paragraph) => {
+                extract_paragraph_children(&paragraph.children, &mut text);
+                text.push('\n');
+            }
+            DocumentChild::Table(table) => {
+                extract_table(table, &mut text);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(text)
+}
+
+// Shared by top-level paragraphs and hyperlinks (both hold Vec<ParagraphChild>).
+fn extract_paragraph_children(children: &[ParagraphChild], text: &mut String) {
+    for child in children {
+        match child {
+            ParagraphChild::Run(run) => {
+                for r_child in &run.children {
+                    if let RunChild::Text(t) = r_child {
+                        text.push_str(&t.text);
+                    }
+                }
+            }
+            ParagraphChild::Hyperlink(hyperlink) => {
+                extract_paragraph_children(&hyperlink.children, text);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn extract_table(table: &Table, text: &mut String) {
+    for row_child in &table.rows {
+        let TableChild::TableRow(row) = row_child;
+        for cell_child in &row.cells {
+            let TableRowChild::TableCell(cell) = cell_child;
+            for content in &cell.children {
+                match content {
+                    TableCellContent::Paragraph(paragraph) => {
+                        extract_paragraph_children(&paragraph.children, text);
+                        text.push('\n');
+                    }
+                    TableCellContent::Table(nested_table) => {
+                        extract_table(nested_table, text); // tables can nest inside cells
+                    }
+                    _ => {}
+                }
+            }
+            text.push('\t'); // cell separator
+        }
+        text.push('\n'); // row separator
+    }
+}
+
+fn extract_text_from_excel(bytes: &[u8]) -> Result<String, calamine::Error> {
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes))?;
+    let mut text = String::new();
+
+    for sheet_name in workbook.sheet_names().to_owned() {
+        let range = workbook.worksheet_range(&sheet_name)?;
+        for row in range.rows() {
+            for cell in row {
+                match cell {
+                    Data::Empty => {}
+                    other => {
+                        text.push_str(&other.to_string()); // Data implements Display for every variant
+                        text.push('\t');
+                    }
+                }
+            }
+            text.push('\n');
+        }
+    }
+
+    Ok(text)
+}
+
+fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor)?;
+    let mut text = String::new();
+
+    // Collect slide file names first so we can sort them (slide1, slide2, ... not zip order).
+    let mut slide_names: Vec<String> = archive
+        .file_names()
+        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .map(String::from)
+        .collect();
+    slide_names.sort_by_key(|n| {
+        n.trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(0)
+    });
+
+    for name in slide_names {
+        let mut file = archive.by_name(&name)?;
+        let mut xml = String::new();
+        file.read_to_string(&mut xml)?;
+
+        let mut reader = Reader::from_str(&xml);
+        let mut buf = Vec::new();
+        let mut in_text_run = false;
+
+        loop {
+            match reader.read_event_into(&mut buf)? {
+                Event::Start(e) if e.local_name().as_ref() == "t" => in_text_run = true,
+                Event::End(e) if e.local_name().as_ref() == "t" => in_text_run = false,
+                Event::Text(e) if in_text_run => {
+                    text.push_str(&quick_xml::escape::unescape(&e)?);
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        text.push('\n'); // slide break
+    }
+
+    Ok(text)
+}
 pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box<dyn Error>> {
     if erratas_job
         .file_info
         .file_type
         .contains(&RealFileType::Image)
     {
-        let gray_image = preprocess(&erratas_job.file_info.contents)?;
-        let mut ocr = Tesseract::new(None, Some("eng"))?;
-        let frame = gray_image.as_raw();
-        let width = gray_image.width() as i32;
-        let height = gray_image.height() as i32;
-        ocr = ocr.set_frame(frame, width, height, 1, width)?;
-
-        let text = ocr.get_text()?;
-
+        let text = extract_text_from_image(&erratas_job.file_info.contents)?;
         erratas_job.file_info.bad_language = has_bad_text(&text);
         erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
     }
 
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(PDF))
+    {
+        let text = pdf_extract::extract_text_from_mem(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
+
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::DOCX,
+        ))
+    {
+        let text = extract_text_from_docx(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
+
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::XLSX,
+        ))
+    {
+        let text = extract_text_from_excel(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::PPT,
+        ))
+    {
+        let text = extract_text_from_powerpoint(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
     Ok(erratas_job)
 }
 
