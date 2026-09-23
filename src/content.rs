@@ -240,7 +240,7 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
         .file_info
         .file_sub_type
         .contains(&crate::types::RealFileSubType::Document(
-            crate::types::DocumentSubType::PPT,
+            crate::types::DocumentSubType::PPTX,
         ))
     {
         let text = extract_text_from_powerpoint(&erratas_job.file_info.contents)?;
@@ -255,6 +255,7 @@ mod tests {
     use super::*;
     use image::{GrayImage, ImageFormat, Luma};
     use std::io::Cursor as IoCursor;
+    use std::io::Write;
 
     // --- has_bad_text -----------------------------------------------
 
@@ -325,6 +326,147 @@ mod tests {
     #[test]
     fn preprocess_fails_closed_on_empty_input() {
         assert!(preprocess(&[]).is_err());
+    }
+
+    // --- extract_text_from_docx --------------------------------------
+    // Built entirely with docx_rs's own writer API so this stays
+    // hermetic -- no external fixture file, no filesystem dependency
+    // beyond the in-memory Cursor.
+    fn build_test_docx_bytes(text: &str) -> Vec<u8> {
+        use docx_rs::{Docx, Paragraph, Run};
+        let mut bytes = Vec::new();
+        Docx::new()
+            .add_paragraph(Paragraph::new().add_run(Run::new().add_text(text)))
+            .build()
+            .pack(IoCursor::new(&mut bytes))
+            .expect("packing an in-memory docx should never fail");
+        bytes
+    }
+
+    #[test]
+    fn extract_text_from_docx_returns_paragraph_text() {
+        let bytes = build_test_docx_bytes("Hello from a hermetic docx fixture");
+        let text = extract_text_from_docx(&bytes).expect("a valid docx should extract cleanly");
+        assert!(text.contains("Hello from a hermetic docx fixture"));
+    }
+
+    // --- extract_text_from_excel --------------------------------------
+    // Unlike the powerpoint extractor below, calamine actually
+    // validates package structure -- so this needs the minimal-but-real
+    // set of OOXML parts a spreadsheet requires (content types, package
+    // rels, the workbook, its rels, and one worksheet with an inline
+    // string cell), still built entirely in memory via the `zip` crate.
+    fn build_test_xlsx_bytes(cell_text: &str) -> Vec<u8> {
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let mut cursor = IoCursor::new(Vec::new());
+        {
+            let mut archive = ZipWriter::new(&mut cursor);
+            let options = SimpleFileOptions::default();
+
+            archive.start_file("[Content_Types].xml", options).unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+                )
+                .unwrap();
+
+            archive.start_file("_rels/.rels", options).unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+                )
+                .unwrap();
+
+            archive.start_file("xl/workbook.xml", options).unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#,
+                )
+                .unwrap();
+
+            archive
+                .start_file("xl/_rels/workbook.xml.rels", options)
+                .unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#,
+                )
+                .unwrap();
+
+            let sheet_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{cell_text}</t></is></c></row></sheetData>
+</worksheet>"#
+            );
+            archive
+                .start_file("xl/worksheets/sheet1.xml", options)
+                .unwrap();
+            archive.write_all(sheet_xml.as_bytes()).unwrap();
+
+            archive.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn extract_text_from_excel_returns_cell_text() {
+        let bytes = build_test_xlsx_bytes("Hello from a hermetic xlsx fixture");
+        let text = extract_text_from_excel(&bytes).expect("a valid xlsx should extract cleanly");
+        assert!(text.contains("Hello from a hermetic xlsx fixture"));
+    }
+
+    // --- extract_text_from_powerpoint -----------------------------------
+    // Unlike calamine above, this extractor never validates package
+    // structure -- it just enumerates ppt/slides/slideN.xml entries and
+    // pulls <a:t> runs out of them -- so a single minimal slide entry,
+    // without the rest of a real pptx's content-types/rels apparatus,
+    // is enough to exercise it.
+    fn build_test_pptx_bytes(slide_text: &str) -> Vec<u8> {
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let mut cursor = IoCursor::new(Vec::new());
+        {
+            let mut archive = ZipWriter::new(&mut cursor);
+            let slide_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{slide_text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+</p:sld>"#
+            );
+            archive
+                .start_file("ppt/slides/slide1.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(slide_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn extract_text_from_powerpoint_returns_slide_text() {
+        let bytes = build_test_pptx_bytes("Hello from a hermetic pptx fixture");
+        let text =
+            extract_text_from_powerpoint(&bytes).expect("a valid pptx should extract cleanly");
+        assert!(text.contains("Hello from a hermetic pptx fixture"));
     }
 
     // --- scan_content --------------------------------------------------

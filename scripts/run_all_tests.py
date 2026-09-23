@@ -203,12 +203,41 @@ FORMAT_FIXTURES: list[FormatFixture] = [
         None,
     ),
     ("example.chm", 64, bytes([0x49, 0x54, 0x53, 0x46]), [], None),
+    # OOXML fixtures: check_ooxml needs the ZIP signature plus
+    # "[Content_Types].xml" present anywhere to classify as a Document at
+    # all, then ooxml_subtype needs each format's own main-part path
+    # (word/document.xml, xl/workbook.xml, xl/workbook.bin, or
+    # ppt/presentation.xml) to pick the specific subtype -- so every
+    # entry below carries both markers.
     (
         "example.docx",
         64,
         bytes([0x50, 0x4B, 0x03, 0x04]),
         [],
-        b"[Content_Types].xml",
+        b"[Content_Types].xmlword/document.xml",
+    ),
+    (
+        "example.xlsx",
+        64,
+        bytes([0x50, 0x4B, 0x03, 0x04]),
+        [],
+        b"[Content_Types].xmlxl/workbook.xml",
+    ),
+    (
+        # .xlsb (Excel Binary Workbook) -- same OOXML zip container, but
+        # its main part is binary (xl/workbook.bin) instead of XML.
+        "example.xlsb",
+        64,
+        bytes([0x50, 0x4B, 0x03, 0x04]),
+        [],
+        b"[Content_Types].xmlxl/workbook.bin",
+    ),
+    (
+        "example.pptx",
+        64,
+        bytes([0x50, 0x4B, 0x03, 0x04]),
+        [],
+        b"[Content_Types].xmlppt/presentation.xml",
     ),
     # --- images ---
     (
