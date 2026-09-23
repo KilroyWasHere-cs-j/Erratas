@@ -5,9 +5,19 @@ use std::error::Error;
 use std::io::Cursor;
 use tesseract::Tesseract;
 
+use calamine::{Data, Reader as _, open_workbook_auto_from_rs};
+use docx_rs::{
+    DocumentChild, ParagraphChild, RunChild, Table, TableCellContent, TableChild, TableRowChild,
+    read_docx,
+};
+use quick_xml::Reader;
+use quick_xml::events::Event;
+use std::io::Read;
+use zip::ZipArchive;
+
 use crate::{
     consts::STRIKE3_IP,
-    types::{ErratasJob, RealFileType},
+    types::{DocumentSubType::PDF, ErratasJob, RealFileType},
 };
 
 // TODO: Scan PII patterns for regex matches.
@@ -15,7 +25,7 @@ use crate::{
 // TODO: Scan profanity patterns for word-list matches.
 
 fn has_bad_text(text: &str) -> bool {
-    text.is(Type::PROFANE | Type::OFFENSIVE)
+    text.is(Type::PROFANE | Type::OFFENSIVE | Type::SEXUAL)
 }
 
 pub fn pii() {}
@@ -41,25 +51,202 @@ fn preprocess(bytes: &[u8]) -> Result<GrayImage, Box<dyn Error>> {
     Ok(gray_image)
 }
 
+fn extract_text_from_image(bytes: &[u8]) -> Result<String, Box<dyn Error>> {
+    let gray_image = preprocess(bytes)?;
+    let mut ocr = Tesseract::new(None, Some("eng"))?;
+    let frame = gray_image.as_raw();
+    let width = gray_image.width() as i32;
+    let height = gray_image.height() as i32;
+    ocr = ocr.set_frame(frame, width, height, 1, width)?;
+
+    let text = ocr.get_text()?;
+    Ok(text)
+}
+
+fn extract_text_from_docx(bytes: &[u8]) -> Result<String, docx_rs::ReaderError> {
+    let docx = read_docx(bytes)?;
+    let mut text = String::new();
+
+    for child in &docx.document.children {
+        match child {
+            DocumentChild::Paragraph(paragraph) => {
+                extract_paragraph_children(&paragraph.children, &mut text);
+                text.push('\n');
+            }
+            DocumentChild::Table(table) => {
+                extract_table(table, &mut text);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(text)
+}
+
+// Shared by top-level paragraphs and hyperlinks (both hold Vec<ParagraphChild>).
+fn extract_paragraph_children(children: &[ParagraphChild], text: &mut String) {
+    for child in children {
+        match child {
+            ParagraphChild::Run(run) => {
+                for r_child in &run.children {
+                    if let RunChild::Text(t) = r_child {
+                        text.push_str(&t.text);
+                    }
+                }
+            }
+            ParagraphChild::Hyperlink(hyperlink) => {
+                extract_paragraph_children(&hyperlink.children, text);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn extract_table(table: &Table, text: &mut String) {
+    for row_child in &table.rows {
+        let TableChild::TableRow(row) = row_child;
+        for cell_child in &row.cells {
+            let TableRowChild::TableCell(cell) = cell_child;
+            for content in &cell.children {
+                match content {
+                    TableCellContent::Paragraph(paragraph) => {
+                        extract_paragraph_children(&paragraph.children, text);
+                        text.push('\n');
+                    }
+                    TableCellContent::Table(nested_table) => {
+                        extract_table(nested_table, text); // tables can nest inside cells
+                    }
+                    _ => {}
+                }
+            }
+            text.push('\t'); // cell separator
+        }
+        text.push('\n'); // row separator
+    }
+}
+
+fn extract_text_from_excel(bytes: &[u8]) -> Result<String, calamine::Error> {
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes))?;
+    let mut text = String::new();
+
+    for sheet_name in workbook.sheet_names().to_owned() {
+        let range = workbook.worksheet_range(&sheet_name)?;
+        for row in range.rows() {
+            for cell in row {
+                match cell {
+                    Data::Empty => {}
+                    other => {
+                        text.push_str(&other.to_string()); // Data implements Display for every variant
+                        text.push('\t');
+                    }
+                }
+            }
+            text.push('\n');
+        }
+    }
+
+    Ok(text)
+}
+
+fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = ZipArchive::new(cursor)?;
+    let mut text = String::new();
+
+    // Collect slide file names first so we can sort them (slide1, slide2, ... not zip order).
+    let mut slide_names: Vec<String> = archive
+        .file_names()
+        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .map(String::from)
+        .collect();
+    slide_names.sort_by_key(|n| {
+        n.trim_start_matches("ppt/slides/slide")
+            .trim_end_matches(".xml")
+            .parse::<u32>()
+            .unwrap_or(0)
+    });
+
+    for name in slide_names {
+        let mut file = archive.by_name(&name)?;
+        let mut xml = String::new();
+        file.read_to_string(&mut xml)?;
+
+        let mut reader = Reader::from_str(&xml);
+        let mut buf = Vec::new();
+        let mut in_text_run = false;
+
+        loop {
+            match reader.read_event_into(&mut buf)? {
+                Event::Start(e) if e.local_name().as_ref() == "t" => in_text_run = true,
+                Event::End(e) if e.local_name().as_ref() == "t" => in_text_run = false,
+                Event::Text(e) if in_text_run => {
+                    text.push_str(&quick_xml::escape::unescape(&e)?);
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+        text.push('\n'); // slide break
+    }
+
+    Ok(text)
+}
 pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box<dyn Error>> {
     if erratas_job
         .file_info
         .file_type
         .contains(&RealFileType::Image)
     {
-        let gray_image = preprocess(&erratas_job.file_info.contents)?;
-        let mut ocr = Tesseract::new(None, Some("eng"))?;
-        let frame = gray_image.as_raw();
-        let width = gray_image.width() as i32;
-        let height = gray_image.height() as i32;
-        ocr = ocr.set_frame(frame, width, height, 1, width)?;
-
-        let text = ocr.get_text()?;
-
+        let text = extract_text_from_image(&erratas_job.file_info.contents)?;
         erratas_job.file_info.bad_language = has_bad_text(&text);
         erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
     }
 
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(PDF))
+    {
+        let text = pdf_extract::extract_text_from_mem(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
+
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::DOCX,
+        ))
+    {
+        let text = extract_text_from_docx(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
+
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::XLSX,
+        ))
+    {
+        let text = extract_text_from_excel(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::PPTX,
+        ))
+    {
+        let text = extract_text_from_powerpoint(&erratas_job.file_info.contents)?;
+        erratas_job.file_info.bad_language = has_bad_text(&text);
+        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+    }
     Ok(erratas_job)
 }
 
@@ -68,6 +255,7 @@ mod tests {
     use super::*;
     use image::{GrayImage, ImageFormat, Luma};
     use std::io::Cursor as IoCursor;
+    use std::io::Write;
 
     // --- has_bad_text -----------------------------------------------
 
@@ -138,6 +326,147 @@ mod tests {
     #[test]
     fn preprocess_fails_closed_on_empty_input() {
         assert!(preprocess(&[]).is_err());
+    }
+
+    // --- extract_text_from_docx --------------------------------------
+    // Built entirely with docx_rs's own writer API so this stays
+    // hermetic -- no external fixture file, no filesystem dependency
+    // beyond the in-memory Cursor.
+    fn build_test_docx_bytes(text: &str) -> Vec<u8> {
+        use docx_rs::{Docx, Paragraph, Run};
+        let mut bytes = Vec::new();
+        Docx::new()
+            .add_paragraph(Paragraph::new().add_run(Run::new().add_text(text)))
+            .build()
+            .pack(IoCursor::new(&mut bytes))
+            .expect("packing an in-memory docx should never fail");
+        bytes
+    }
+
+    #[test]
+    fn extract_text_from_docx_returns_paragraph_text() {
+        let bytes = build_test_docx_bytes("Hello from a hermetic docx fixture");
+        let text = extract_text_from_docx(&bytes).expect("a valid docx should extract cleanly");
+        assert!(text.contains("Hello from a hermetic docx fixture"));
+    }
+
+    // --- extract_text_from_excel --------------------------------------
+    // Unlike the powerpoint extractor below, calamine actually
+    // validates package structure -- so this needs the minimal-but-real
+    // set of OOXML parts a spreadsheet requires (content types, package
+    // rels, the workbook, its rels, and one worksheet with an inline
+    // string cell), still built entirely in memory via the `zip` crate.
+    fn build_test_xlsx_bytes(cell_text: &str) -> Vec<u8> {
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let mut cursor = IoCursor::new(Vec::new());
+        {
+            let mut archive = ZipWriter::new(&mut cursor);
+            let options = SimpleFileOptions::default();
+
+            archive.start_file("[Content_Types].xml", options).unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+                )
+                .unwrap();
+
+            archive.start_file("_rels/.rels", options).unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+                )
+                .unwrap();
+
+            archive.start_file("xl/workbook.xml", options).unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#,
+                )
+                .unwrap();
+
+            archive
+                .start_file("xl/_rels/workbook.xml.rels", options)
+                .unwrap();
+            archive
+                .write_all(
+                    br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#,
+                )
+                .unwrap();
+
+            let sheet_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{cell_text}</t></is></c></row></sheetData>
+</worksheet>"#
+            );
+            archive
+                .start_file("xl/worksheets/sheet1.xml", options)
+                .unwrap();
+            archive.write_all(sheet_xml.as_bytes()).unwrap();
+
+            archive.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn extract_text_from_excel_returns_cell_text() {
+        let bytes = build_test_xlsx_bytes("Hello from a hermetic xlsx fixture");
+        let text = extract_text_from_excel(&bytes).expect("a valid xlsx should extract cleanly");
+        assert!(text.contains("Hello from a hermetic xlsx fixture"));
+    }
+
+    // --- extract_text_from_powerpoint -----------------------------------
+    // Unlike calamine above, this extractor never validates package
+    // structure -- it just enumerates ppt/slides/slideN.xml entries and
+    // pulls <a:t> runs out of them -- so a single minimal slide entry,
+    // without the rest of a real pptx's content-types/rels apparatus,
+    // is enough to exercise it.
+    fn build_test_pptx_bytes(slide_text: &str) -> Vec<u8> {
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let mut cursor = IoCursor::new(Vec::new());
+        {
+            let mut archive = ZipWriter::new(&mut cursor);
+            let slide_xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{slide_text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+</p:sld>"#
+            );
+            archive
+                .start_file("ppt/slides/slide1.xml", SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(slide_xml.as_bytes()).unwrap();
+            archive.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    #[test]
+    fn extract_text_from_powerpoint_returns_slide_text() {
+        let bytes = build_test_pptx_bytes("Hello from a hermetic pptx fixture");
+        let text =
+            extract_text_from_powerpoint(&bytes).expect("a valid pptx should extract cleanly");
+        assert!(text.contains("Hello from a hermetic pptx fixture"));
     }
 
     // --- scan_content --------------------------------------------------
