@@ -1185,6 +1185,7 @@ dependencies = [
  "docx-rs",
  "image",
  "imageproc",
+ "lazy_static",
  "pdf-extract",
  "quick-xml 0.42.0",
  "rustrict",
