@@ -25,6 +25,34 @@ called it — which is the same reason most AV/content-scanning engines
 run as their own process rather than linking in as a library. It also
 means Erratas ships and updates independently of whatever's calling it.
 
+## Why Rust (not Go)
+
+Came up while investigating the scan hot-path performance work
+([#27](https://github.com/KilroyWasHere-cs-j/Erratas/issues/27)): would Go
+be meaningfully slower for this kind of byte-scanning workload? Tested it
+directly rather than guessing, with two standalone (non-project) mockups —
+a hand-rolled Aho-Corasick automaton (trie + failure links, no external
+dependencies) built identically in both languages, searching the same 37
+magic-byte patterns from `MAGIC_PATTERNS` in `src/files.rs`:
+
+| Scenario | Go | Rust | Rust is... |
+|---|---:|---:|---:|
+| 64 B file | 0.001s | 0.001s | tied |
+| 518 KB real PDF | 0.011s | 0.002s | ~5.5x faster |
+| 10 MB, worst case | 0.165s | 0.021s | ~8x faster |
+
+Same algorithm, same patterns, same inputs — the gap is real, likely from
+Go's GC and less aggressive inlining/bounds-check elision showing up on a
+tight per-byte scan loop.
+
+Beyond the raw numbers, the two heaviest dependencies this project leans
+on are also a better fit in Rust specifically: `yara-x` is a from-scratch
+*pure-Rust* reimplementation of YARA, chosen to avoid linking the C
+`libyara` at all, and Tesseract OCR needs FFI either way but Rust's is
+lower-overhead than Go's cgo. A Go rewrite would mean pulling `libyara`
+back in via cgo (or a less mature Go YARA binding) and paying cgo's
+per-call overhead on every OCR call too.
+
 ## Status
 
 Scaffolding only right now — the module layout and type signatures are
