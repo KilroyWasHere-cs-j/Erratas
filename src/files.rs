@@ -1,4 +1,8 @@
+use std::collections::HashMap;
 use std::error::Error;
+
+use aho_corasick::AhoCorasick;
+use lazy_static::lazy_static;
 
 use crate::types::{
     ArchiveSubType, AudioSubType, DocumentSubType, ErratasJob, ExecutableSubType, ImageSubType,
@@ -6,7 +10,12 @@ use crate::types::{
 };
 
 pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
-    if let Some(offset) = check_elf(&erratas_job.file_info.contents) {
+    // One shared pass over the whole file for every fallback pattern, up
+    // front -- every check_* below consults this instead of re-scanning
+    // the file itself (see #27 and MagicMatches above).
+    let matches = MagicMatches::scan(&erratas_job.file_info.contents);
+
+    if let Some(offset) = check_elf(&erratas_job.file_info.contents, &matches) {
         let file_sub_type = if is_elf_shared_object(&erratas_job.file_info.contents, offset) {
             ExecutableSubType::SO
         } else {
@@ -22,7 +31,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
             .push(RealFileSubType::Executable(file_sub_type));
     }
 
-    match check_winexe(&erratas_job.file_info.contents) {
+    match check_winexe(&erratas_job.file_info.contents, &matches) {
         Ok(RealFileType::WinExecutable) => {
             erratas_job
                 .file_info
@@ -39,7 +48,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
     }
 
-    match check_dll(&erratas_job.file_info.contents) {
+    match check_dll(&erratas_job.file_info.contents, &matches) {
         RealFileType::WinExecutable => {
             erratas_job
                 .file_info
@@ -53,7 +62,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_lnk(&erratas_job.file_info.contents) {
+    match check_lnk(&erratas_job.file_info.contents, &matches) {
         RealFileType::WinExecutable => {
             erratas_job
                 .file_info
@@ -67,7 +76,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_macho(&erratas_job.file_info.contents) {
+    match check_macho(&erratas_job.file_info.contents, &matches) {
         RealFileType::MacExecutable => {
             erratas_job
                 .file_info
@@ -81,7 +90,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_dmg(&erratas_job.file_info.contents) {
+    match check_dmg(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -95,20 +104,18 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     // Must come before check_zip -- otherwise a .docx/.xlsx/.pptx would
     // already match as a plain Archive before we get a chance to notice
     // it's actually an OOXML document.
-    match check_ooxml(&erratas_job.file_info.contents) {
+    match check_ooxml(&matches) {
         RealFileType::Document => {
             erratas_job.file_info.file_type.push(RealFileType::Document);
             erratas_job
                 .file_info
                 .file_sub_type
-                .push(RealFileSubType::Document(ooxml_subtype(
-                    &erratas_job.file_info.contents,
-                )));
+                .push(RealFileSubType::Document(ooxml_subtype(&matches)));
         }
         _ => {}
     }
 
-    match check_zip(&erratas_job.file_info.contents) {
+    match check_zip(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -119,7 +126,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_rar(&erratas_job.file_info.contents) {
+    match check_rar(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -129,7 +136,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_7z(&erratas_job.file_info.contents) {
+    match check_7z(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -140,7 +147,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_cab(&erratas_job.file_info.contents) {
+    match check_cab(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -151,7 +158,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_tar(&erratas_job.file_info.contents) {
+    match check_tar(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -162,7 +169,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_iso(&erratas_job.file_info.contents) {
+    match check_iso(&erratas_job.file_info.contents, &matches) {
         RealFileType::Archive => {
             erratas_job.file_info.file_type.push(RealFileType::Archive);
             erratas_job
@@ -183,7 +190,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_pdf(&erratas_job.file_info.contents) {
+    match check_pdf(&erratas_job.file_info.contents, &matches) {
         RealFileType::Document => {
             erratas_job.file_info.file_type.push(RealFileType::Document);
             erratas_job
@@ -194,7 +201,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_ole_cfb(&erratas_job.file_info.contents) {
+    match check_ole_cfb(&erratas_job.file_info.contents, &matches) {
         RealFileType::Document => {
             erratas_job.file_info.file_type.push(RealFileType::Document);
             erratas_job
@@ -207,7 +214,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_chm(&erratas_job.file_info.contents) {
+    match check_chm(&erratas_job.file_info.contents, &matches) {
         RealFileType::Document => {
             erratas_job.file_info.file_type.push(RealFileType::Document);
             erratas_job
@@ -218,7 +225,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_png(&erratas_job.file_info.contents) {
+    match check_png(&erratas_job.file_info.contents, &matches) {
         RealFileType::Image => {
             erratas_job.file_info.file_type.push(RealFileType::Image);
             erratas_job
@@ -228,7 +235,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_jpeg(&erratas_job.file_info.contents) {
+    match check_jpeg(&erratas_job.file_info.contents, &matches) {
         RealFileType::Image => {
             erratas_job.file_info.file_type.push(RealFileType::Image);
             erratas_job
@@ -238,7 +245,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_gif(&erratas_job.file_info.contents) {
+    match check_gif(&erratas_job.file_info.contents, &matches) {
         RealFileType::Image => {
             erratas_job.file_info.file_type.push(RealFileType::Image);
             erratas_job
@@ -248,7 +255,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_bmp(&erratas_job.file_info.contents) {
+    match check_bmp(&erratas_job.file_info.contents, &matches) {
         RealFileType::Image => {
             erratas_job.file_info.file_type.push(RealFileType::Image);
             erratas_job
@@ -258,7 +265,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_webp(&erratas_job.file_info.contents) {
+    match check_webp(&erratas_job.file_info.contents, &matches) {
         RealFileType::Image => {
             erratas_job.file_info.file_type.push(RealFileType::Image);
             erratas_job
@@ -268,7 +275,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_tiff(&erratas_job.file_info.contents) {
+    match check_tiff(&erratas_job.file_info.contents, &matches) {
         RealFileType::Image => {
             erratas_job.file_info.file_type.push(RealFileType::Image);
             erratas_job
@@ -279,7 +286,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_wav(&erratas_job.file_info.contents) {
+    match check_wav(&erratas_job.file_info.contents, &matches) {
         RealFileType::Audio => {
             erratas_job.file_info.file_type.push(RealFileType::Audio);
             erratas_job
@@ -289,7 +296,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_flac(&erratas_job.file_info.contents) {
+    match check_flac(&erratas_job.file_info.contents, &matches) {
         RealFileType::Audio => {
             erratas_job.file_info.file_type.push(RealFileType::Audio);
             erratas_job
@@ -299,7 +306,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_ogg(&erratas_job.file_info.contents) {
+    match check_ogg(&erratas_job.file_info.contents, &matches) {
         RealFileType::Audio => {
             erratas_job.file_info.file_type.push(RealFileType::Audio);
             erratas_job
@@ -309,7 +316,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_mp3(&erratas_job.file_info.contents) {
+    match check_mp3(&erratas_job.file_info.contents, &matches) {
         RealFileType::Audio => {
             erratas_job.file_info.file_type.push(RealFileType::Audio);
             erratas_job
@@ -320,7 +327,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         _ => {}
     }
 
-    match check_mp4(&erratas_job.file_info.contents) {
+    match check_mp4(&erratas_job.file_info.contents, &matches) {
         RealFileType::Video => {
             erratas_job.file_info.file_type.push(RealFileType::Video);
             erratas_job
@@ -330,7 +337,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_webm(&erratas_job.file_info.contents) {
+    match check_webm(&erratas_job.file_info.contents, &matches) {
         RealFileType::Video => {
             erratas_job.file_info.file_type.push(RealFileType::Video);
             erratas_job
@@ -340,7 +347,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
-    match check_avi(&erratas_job.file_info.contents) {
+    match check_avi(&erratas_job.file_info.contents, &matches) {
         RealFileType::Video => {
             erratas_job.file_info.file_type.push(RealFileType::Video);
             erratas_job
@@ -368,23 +375,12 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
 // Returns the byte offset where the ELF magic was found, so callers (like
 // is_elf_shared_object) can read the rest of the header relative to where
 // it actually starts -- not always 0, once a fallback match is involved.
-fn check_elf(contents: &[u8]) -> Option<usize> {
+fn check_elf(contents: &[u8], matches: &MagicMatches) -> Option<usize> {
     let elf_magic = [0x7F, 0x45, 0x4C, 0x46];
     if contents.len() >= 4 && contents[0..4] == elf_magic {
         return Some(0);
     }
-
-    // contents.len() < 4 has no valid window to scan; guard first so the
-    // range below can't underflow.
-    if contents.len() < 4 {
-        return None;
-    }
-    for i in 0..=(contents.len() - 4) {
-        if contents[i..i + 4] == elf_magic {
-            return Some(i);
-        }
-    }
-    None
+    matches.positions(&elf_magic).first().copied()
 }
 
 // e_type (offset 16, 2 bytes) tells ELF binaries and shared objects apart --
@@ -407,46 +403,123 @@ fn is_elf_shared_object(contents: &[u8], base: usize) -> bool {
     e_type == ET_DYN
 }
 
-// Fallback scanner for when a format's magic bytes aren't where they're
-// normally expected -- a crafted or carved file (a payload appended after
-// other data, junk prepended to dodge a fixed-offset check, the same
-// trick strange_offset.exe demonstrates for PE) can still be caught this
-// way. The cost is scanning the whole file, and a real risk of false
-// positives on short patterns that occur by chance elsewhere in the
-// bytes -- the same tradeoff check_winexe already makes for its own MZ/PE
-// fallback loops. Only runs when the fast primary check already missed,
-// so a normal well-formed file never pays for it.
-fn scan_for(contents: &[u8], pattern: &[u8]) -> bool {
-    if pattern.is_empty() || contents.len() < pattern.len() {
-        return false;
-    }
-    for i in 0..=(contents.len() - pattern.len()) {
-        if &contents[i..i + pattern.len()] == pattern {
-            return true;
-        }
-    }
-    false
+// Every fixed byte pattern any check_*'s fallback path looks for, once a
+// format's magic bytes aren't where they're normally expected (a crafted
+// or carved file -- a payload appended after other data, junk prepended to
+// dodge a fixed-offset check, the same trick strange_offset.exe
+// demonstrates for PE). Collected into one list so a single AhoCorasick
+// automaton can search the whole file for all of them in a single pass,
+// instead of each check_* re-scanning the file independently the way
+// scan_for/scan_for_at_offset used to (see #27) -- only paid once per
+// file, not once per format. Each check_*'s *fixed-offset* fast path is
+// untouched by any of this; it's only the "wasn't at the expected offset"
+// fallback that now consults MagicMatches instead of re-scanning.
+const MAGIC_PATTERNS: &[&[u8]] = &[
+    &[0x7F, 0x45, 0x4C, 0x46],                          // ELF
+    &[0xFE, 0xED, 0xFA, 0xCE],                          // Mach-O 32-bit LE
+    &[0xCE, 0xFA, 0xED, 0xFE],                          // Mach-O 32-bit BE
+    &[0xFE, 0xED, 0xFA, 0xCF],                          // Mach-O 64-bit LE
+    &[0xCF, 0xFA, 0xED, 0xFE],                          // Mach-O 64-bit BE
+    &[0xCA, 0xFE, 0xBA, 0xBE],                          // Mach-O fat/universal LE
+    &[0xBE, 0xBA, 0xFE, 0xCA],                          // Mach-O fat/universal BE
+    &[0x4D, 0x5A],                                      // MZ (Windows EXE/DLL/LNK precursor)
+    &[0x50, 0x45, 0x00, 0x00],                          // PE header
+    b"koly",                                            // DMG UDIF trailer
+    &[0x50, 0x4B, 0x03, 0x04],                          // ZIP local file header
+    &[0x50, 0x4B, 0x05, 0x06],                          // ZIP end-of-central-directory
+    b"[Content_Types].xml",                             // OOXML package marker
+    b"word/document.xml",                               // DOCX subtype marker
+    b"xl/workbook.xml",                                 // XLSX subtype marker
+    b"xl/workbook.bin",                                 // XLSB subtype marker
+    b"ppt/presentation.xml",                            // PPTX subtype marker
+    &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07],              // RAR
+    &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C],              // 7z
+    b"MSCF",                                            // CAB
+    b"ustar",                                           // TAR (POSIX, normally at offset 257)
+    b"CD001",                                           // ISO 9660 (normally at offset 0x8001)
+    b"%PDF-",                                           // PDF
+    &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1], // OLE-CFB (legacy DOC/XLS/PPT, MSI, MSG)
+    b"ITSF",                                            // CHM
+    &[
+        // LNK (Windows shortcut)
+        0x4C, 0x00, 0x00, 0x00, 0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x46,
+    ],
+    &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], // PNG
+    &[0xFF, 0xD8, 0xFF],                               // JPEG
+    b"GIF87a",                                          // GIF (87a)
+    b"GIF89a",                                          // GIF (89a)
+    b"BM",                                              // BMP
+    b"RIFF",                                            // RIFF container (WAV/WEBP/AVI, normally at offset 0)
+    b"WEBP",                                            // WebP (normally at offset 8, inside RIFF)
+    &[0x49, 0x49, 0x2A, 0x00],                         // TIFF little-endian ("II")
+    &[0x4D, 0x4D, 0x00, 0x2A],                         // TIFF big-endian ("MM")
+    b"WAVE",                                            // WAV (normally at offset 8, inside RIFF)
+    b"fLaC",                                            // FLAC
+    b"OggS",                                            // OGG
+    b"ID3",                                             // MP3 (ID3v2-tagged variant only)
+    b"ftyp",                                            // MP4 (normally at offset 4)
+    &[0x1A, 0x45, 0xDF, 0xA3],                         // WebM/Matroska (EBML)
+    b"AVI ",                                            // AVI (normally at offset 8, inside RIFF)
+];
+
+lazy_static! {
+    static ref MAGIC_AC: AhoCorasick =
+        AhoCorasick::new(MAGIC_PATTERNS).expect("magic-byte pattern set should always compile");
 }
 
-// Same idea, for RIFF-style container formats where the real signature is
-// a fixed number of bytes after an anchor tag rather than at one fixed
-// spot -- finds `anchor` anywhere, then checks whether `tag` sits `gap`
-// bytes after wherever it was found.
-fn scan_for_at_offset(contents: &[u8], anchor: &[u8], gap: usize, tag: &[u8]) -> bool {
-    if anchor.is_empty() || contents.len() < anchor.len() {
-        return false;
+// Every MAGIC_PATTERNS entry's match positions within one file -- built
+// with a single AhoCorasick pass over the whole file (see MAGIC_AC above)
+// instead of a separate scan per pattern. `contains`/`positions` are the
+// direct replacement for the old scan_for; `contains_at_offset` for
+// scan_for_at_offset.
+struct MagicMatches {
+    by_pattern: HashMap<&'static [u8], Vec<usize>>,
+}
+
+impl MagicMatches {
+    fn scan(contents: &[u8]) -> MagicMatches {
+        MagicMatches::scan_with(&MAGIC_AC, MAGIC_PATTERNS, contents)
     }
-    for i in 0..=(contents.len() - anchor.len()) {
-        if &contents[i..i + anchor.len()] == anchor {
-            let tag_start = i + gap;
-            if contents.len() >= tag_start + tag.len()
-                && &contents[tag_start..tag_start + tag.len()] == tag
-            {
-                return true;
-            }
+
+    // Generalized over an arbitrary automaton/pattern-list pair so the
+    // underlying multi-pattern-match mechanism can be unit-tested in
+    // isolation from the real, fixed MAGIC_PATTERNS set.
+    fn scan_with(ac: &AhoCorasick, patterns: &[&'static [u8]], contents: &[u8]) -> MagicMatches {
+        let mut by_pattern: HashMap<&'static [u8], Vec<usize>> =
+            patterns.iter().map(|p| (*p, Vec::new())).collect();
+        for m in ac.find_iter(contents) {
+            let pattern = patterns[m.pattern().as_usize()];
+            by_pattern.get_mut(pattern).unwrap().push(m.start());
         }
+        MagicMatches { by_pattern }
     }
-    false
+
+    // Every position `pattern` was found at, in ascending order. Empty if
+    // `pattern` was never in the automaton's pattern list or never matched.
+    fn positions(&self, pattern: &[u8]) -> &[usize] {
+        self.by_pattern
+            .get(pattern)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    // Direct replacement for the old scan_for(contents, pattern).
+    fn contains(&self, pattern: &[u8]) -> bool {
+        if pattern.is_empty() {
+            return false;
+        }
+        !self.positions(pattern).is_empty()
+    }
+
+    // Direct replacement for the old scan_for_at_offset(contents, anchor,
+    // gap, tag): is `tag` present at exactly `gap` bytes after some
+    // occurrence of `anchor`?
+    fn contains_at_offset(&self, anchor: &[u8], gap: usize, tag: &[u8]) -> bool {
+        self.positions(anchor)
+            .iter()
+            .any(|&pos| self.positions(tag).contains(&(pos + gap)))
+    }
 }
 
 const MACHO_MAGICKS: [[u8; 4]; 6] = [
@@ -458,7 +531,7 @@ const MACHO_MAGICKS: [[u8; 4]; 6] = [
     [0xBE, 0xBA, 0xFE, 0xCA],
 ];
 
-fn check_macho(contents: &[u8]) -> RealFileType {
+fn check_macho(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4 {
         match [contents[0], contents[1], contents[2], contents[3]] {
             // 32-bit Mach-O, either byte order.
@@ -479,66 +552,37 @@ fn check_macho(contents: &[u8]) -> RealFileType {
         }
     }
     for magic in MACHO_MAGICKS.iter() {
-        if scan_for(contents, magic) {
+        if matches.contains(magic) {
             return RealFileType::MacExecutable;
         }
     }
     RealFileType::Unknown
 }
 
-fn check_winexe(contents: &[u8]) -> Result<RealFileType, Box<dyn Error>> {
+fn check_winexe(contents: &[u8], matches: &MagicMatches) -> Result<RealFileType, Box<dyn Error>> {
     if contents.len() < 64 {
         return Ok(RealFileType::Unknown);
     }
-    let mut pe = false;
-    let mut mz = false;
 
     // A normal executable has a MZ firstly so if it's there we done.
-    if contents[0] == 0x4D && contents[1] == 0x5A {
-        println!("MZ");
-        mz = true;
-    }
+    let mz = contents[0] == 0x4D && contents[1] == 0x5A;
 
-    if contents[0x3C] == 0x50
+    let pe = contents[0x3C] == 0x50
         && contents[0x3C + 1] == 0x45
         && contents[0x3C + 2] == 0x00
-        && contents[0x3C + 3] == 0x00
-    {
-        println!("PE");
-        pe = true;
-    }
+        && contents[0x3C + 3] == 0x00;
 
     if mz && pe {
         return Ok(RealFileType::WinExecutable);
-    } else {
-        pe = false;
-        mz = false;
     }
 
-    for i in 0..contents.len() - 1 {
-        if contents[i] == 0x4D && contents[i + 1] == 0x5A {
-            mz = true;
-            break;
-        }
-    }
-    for i in 0..contents.len() - 1 {
-        if contents[i] == 0x50
-            && contents[i + 1] == 0x45
-            && contents[i + 2] == 0x00
-            && contents[i + 3] == 0x00
-        {
-            pe = true;
-            break;
-        }
-    }
-
-    if mz && pe {
+    if matches.contains(&[0x4D, 0x5A]) && matches.contains(&[0x50, 0x45, 0x00, 0x00]) {
         return Ok(RealFileType::WinExecutable);
     }
     return Ok(RealFileType::Unknown);
 }
 
-fn check_dmg(contents: &[u8]) -> RealFileType {
+fn check_dmg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // DMG has no signature at the front -- the real marker is the "koly"
     // UDIF trailer block, which normally sits in the last 512 bytes.
     if contents.len() >= 512 {
@@ -553,13 +597,13 @@ fn check_dmg(contents: &[u8]) -> RealFileType {
     }
     // Extra data appended past the real trailer would hide it from the
     // check above -- fall back to a full scan for "koly" anywhere.
-    if scan_for(contents, b"koly") {
+    if matches.contains(b"koly") {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_ooxml(contents: &[u8]) -> RealFileType {
+fn check_ooxml(matches: &MagicMatches) -> RealFileType {
     // .docx/.xlsx/.pptx (Office Open XML) are ZIP archives internally, so
     // a plain PK signature alone can't tell one apart from a generic
     // .zip. Every OOXML package does, however, always carry an entry
@@ -571,8 +615,8 @@ fn check_ooxml(contents: &[u8]) -> RealFileType {
     // "ppt/presentation.xml" instead. Must run before check_zip in
     // identify_type, or these would already have matched as a plain
     // Archive by then.
-    let is_zip = scan_for(contents, &[0x50, 0x4B, 0x03, 0x04]);
-    let is_ooxml = scan_for(contents, b"[Content_Types].xml");
+    let is_zip = matches.contains(&[0x50, 0x4B, 0x03, 0x04]);
+    let is_ooxml = matches.contains(b"[Content_Types].xml");
     if is_zip && is_ooxml {
         return RealFileType::Document;
     }
@@ -584,11 +628,11 @@ fn check_ooxml(contents: &[u8]) -> RealFileType {
 // name each format's package always carries at a fixed path. Falls back
 // to the generic OOXML variant if none of these match (a format this
 // doesn't know about yet, or a package that's missing that entry).
-fn ooxml_subtype(contents: &[u8]) -> DocumentSubType {
-    if scan_for(contents, b"word/document.xml") {
+fn ooxml_subtype(matches: &MagicMatches) -> DocumentSubType {
+    if matches.contains(b"word/document.xml") {
         return DocumentSubType::DOCX;
     }
-    if scan_for(contents, b"xl/workbook.xml") {
+    if matches.contains(b"xl/workbook.xml") {
         return DocumentSubType::XLSX;
     }
     // .xlsb (Excel Binary Workbook) is still an OOXML zip package, but
@@ -596,16 +640,16 @@ fn ooxml_subtype(contents: &[u8]) -> DocumentSubType {
     // xl/workbook.bin, not xl/workbook.xml. Bucketed under XLSX rather
     // than its own subtype, same as this function already does for the
     // other three families.
-    if scan_for(contents, b"xl/workbook.bin") {
+    if matches.contains(b"xl/workbook.bin") {
         return DocumentSubType::XLSX;
     }
-    if scan_for(contents, b"ppt/presentation.xml") {
+    if matches.contains(b"ppt/presentation.xml") {
         return DocumentSubType::PPTX;
     }
     DocumentSubType::OOXML
 }
 
-fn check_zip(contents: &[u8]) -> RealFileType {
+fn check_zip(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4 {
         // Local file header.
         if contents[0] == 0x50 && contents[1] == 0x4B && contents[2] == 0x03 && contents[3] == 0x04
@@ -620,15 +664,14 @@ fn check_zip(contents: &[u8]) -> RealFileType {
     }
     // A polyglot/dropper file (self-extracting installer, JAR, APK) has
     // real zip data starting well past offset 0 -- scan for it.
-    if scan_for(contents, &[0x50, 0x4B, 0x03, 0x04])
-        || scan_for(contents, &[0x50, 0x4B, 0x05, 0x06])
+    if matches.contains(&[0x50, 0x4B, 0x03, 0x04]) || matches.contains(&[0x50, 0x4B, 0x05, 0x06])
     {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_rar(contents: &[u8]) -> RealFileType {
+fn check_rar(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // RAR 1.5-4.x and RAR5 share this 6-byte prefix.
     let sig = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07];
     if contents.len() >= 6
@@ -641,13 +684,13 @@ fn check_rar(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Archive;
     }
-    if scan_for(contents, &sig) {
+    if matches.contains(&sig) {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_7z(contents: &[u8]) -> RealFileType {
+fn check_7z(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     let sig = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
     if contents.len() >= 6
         && contents[0] == sig[0]
@@ -659,13 +702,13 @@ fn check_7z(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Archive;
     }
-    if scan_for(contents, &sig) {
+    if matches.contains(&sig) {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_cab(contents: &[u8]) -> RealFileType {
+fn check_cab(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Microsoft Cabinet format, used by installers/updates -- "MSCF" magic.
     if contents.len() >= 4
         && contents[0] == b'M'
@@ -675,13 +718,13 @@ fn check_cab(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Archive;
     }
-    if scan_for(contents, b"MSCF") {
+    if matches.contains(b"MSCF") {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_tar(contents: &[u8]) -> RealFileType {
+fn check_tar(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Unlike the others, tar has no signature at offset 0. The "ustar"
     // magic sits 257 bytes into the header in the POSIX variant -- old-style
     // tar has no magic at all and can't be detected this way.
@@ -697,13 +740,13 @@ fn check_tar(contents: &[u8]) -> RealFileType {
     }
     // A tar embedded/carved inside other data shifts this whole offset --
     // fall back to a plain scan for "ustar" anywhere.
-    if scan_for(contents, b"ustar") {
+    if matches.contains(b"ustar") {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_iso(contents: &[u8]) -> RealFileType {
+fn check_iso(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // ISO 9660's "CD001" signature sits at byte offset 0x8001, inside the
     // Primary Volume Descriptor (logical sector 16, 2048 bytes/sector).
     let o = 0x8001;
@@ -718,13 +761,13 @@ fn check_iso(contents: &[u8]) -> RealFileType {
     }
     // A hybrid/appended ISO can shift this offset too -- fall back to a
     // plain scan for "CD001" anywhere.
-    if scan_for(contents, b"CD001") {
+    if matches.contains(b"CD001") {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
 }
 
-fn check_pdf(contents: &[u8]) -> RealFileType {
+fn check_pdf(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 5
         && contents[0] == b'%'
         && contents[1] == b'P'
@@ -736,13 +779,13 @@ fn check_pdf(contents: &[u8]) -> RealFileType {
     }
     // Real PDF readers already tolerate junk before "%PDF-" -- a payload
     // could exploit that same leniency to dodge a fixed-offset check.
-    if scan_for(contents, b"%PDF-") {
+    if matches.contains(b"%PDF-") {
         return RealFileType::Document;
     }
     return RealFileType::Unknown;
 }
 
-fn check_ole_cfb(contents: &[u8]) -> RealFileType {
+fn check_ole_cfb(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Legacy (pre-2007) Office formats (.doc/.xls/.ppt) all use this same
     // Compound File Binary container -- and so do non-Office Microsoft
     // formats like .msi installers and .msg Outlook messages. This magic
@@ -763,7 +806,7 @@ fn check_ole_cfb(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Document;
     }
-    if scan_for(contents, &sig) {
+    if matches.contains(&sig) {
         return RealFileType::Document;
     }
     RealFileType::Unknown
@@ -957,7 +1000,7 @@ fn ole_cfb_subtype(contents: &[u8]) -> DocumentSubType {
     DocumentSubType::OLECFB
 }
 
-fn check_chm(contents: &[u8]) -> RealFileType {
+fn check_chm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Compiled HTML Help -- "ITSF" magic. Historically abused as a
     // malware delivery vector (CHM files can embed scripts).
     if contents.len() >= 4
@@ -968,7 +1011,7 @@ fn check_chm(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Document;
     }
-    if scan_for(contents, b"ITSF") {
+    if matches.contains(b"ITSF") {
         return RealFileType::Document;
     }
     RealFileType::Unknown
@@ -1019,7 +1062,7 @@ fn check_dll_at(contents: &[u8], base: usize) -> Option<RealFileType> {
     None
 }
 
-fn check_dll(contents: &[u8]) -> RealFileType {
+fn check_dll(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // A DLL is a PE file with the IMAGE_FILE_DLL characteristic flag set --
     // same container format as an EXE, just flagged as a library instead.
     // Unlike check_winexe (which treats offset 0x3C as the header itself),
@@ -1028,22 +1071,22 @@ fn check_dll(contents: &[u8]) -> RealFileType {
     if let Some(result) = check_dll_at(contents, 0) {
         return result;
     }
-    // A dropped/appended PE payload might not start at offset 0 -- scan
-    // for any other "MZ" and re-check relative to it, same fallback idea
-    // as check_winexe's own MZ/PE scan.
-    if contents.len() >= 2 {
-        for i in 1..=(contents.len() - 2) {
-            if contents[i] == 0x4D && contents[i + 1] == 0x5A {
-                if let Some(result) = check_dll_at(contents, i) {
-                    return result;
-                }
-            }
+    // A dropped/appended PE payload might not start at offset 0 -- try
+    // every other "MZ" position the shared scan already found and
+    // re-check relative to it, same fallback idea as check_winexe's own
+    // MZ/PE scan.
+    for &i in matches.positions(&[0x4D, 0x5A]) {
+        if i == 0 {
+            continue;
+        }
+        if let Some(result) = check_dll_at(contents, i) {
+            return result;
         }
     }
     return RealFileType::Unknown;
 }
 
-fn check_lnk(contents: &[u8]) -> RealFileType {
+fn check_lnk(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Windows shortcut files: a fixed 20-byte header made up of a
     // HeaderSize field plus the well-known shell-link CLSID. Long and
     // specific enough that false positives are unlikely, unlike the
@@ -1057,24 +1100,24 @@ fn check_lnk(contents: &[u8]) -> RealFileType {
         0x00, 0x00, 0x00, 0x00, 0x46,
     ];
     if contents.len() >= sig.len() {
-        let mut matches = true;
+        let mut header_matches = true;
         for i in 0..sig.len() {
             if contents[i] != sig[i] {
-                matches = false;
+                header_matches = false;
                 break;
             }
         }
-        if matches {
+        if header_matches {
             return RealFileType::WinExecutable;
         }
     }
-    if scan_for(contents, &sig) {
+    if matches.contains(&sig) {
         return RealFileType::WinExecutable;
     }
     RealFileType::Unknown
 }
 
-fn check_png(contents: &[u8]) -> RealFileType {
+fn check_png(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     let sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     if contents.len() >= 8
         && contents[0] == sig[0]
@@ -1088,23 +1131,23 @@ fn check_png(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Image;
     }
-    if scan_for(contents, &sig) {
+    if matches.contains(&sig) {
         return RealFileType::Image;
     }
     return RealFileType::Unknown;
 }
 
-fn check_jpeg(contents: &[u8]) -> RealFileType {
+fn check_jpeg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 3 && contents[0] == 0xFF && contents[1] == 0xD8 && contents[2] == 0xFF {
         return RealFileType::Image;
     }
-    if scan_for(contents, &[0xFF, 0xD8, 0xFF]) {
+    if matches.contains(&[0xFF, 0xD8, 0xFF]) {
         return RealFileType::Image;
     }
     return RealFileType::Unknown;
 }
 
-fn check_gif(contents: &[u8]) -> RealFileType {
+fn check_gif(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Covers both GIF87a and GIF89a -- they only differ in that version tag.
     if contents.len() >= 6 {
         let header_ok = contents[0] == b'G'
@@ -1116,26 +1159,26 @@ fn check_gif(contents: &[u8]) -> RealFileType {
             return RealFileType::Image;
         }
     }
-    if scan_for(contents, b"GIF87a") || scan_for(contents, b"GIF89a") {
+    if matches.contains(b"GIF87a") || matches.contains(b"GIF89a") {
         return RealFileType::Image;
     }
     return RealFileType::Unknown;
 }
 
-fn check_bmp(contents: &[u8]) -> RealFileType {
+fn check_bmp(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 2 && contents[0] == b'B' && contents[1] == b'M' {
         return RealFileType::Image;
     }
     // "BM" is only 2 bytes, so this fallback scan carries a real
     // false-positive risk on incidental byte pairs elsewhere in the file --
     // accepted here for consistency with the other formats' fallback scans.
-    if scan_for(contents, b"BM") {
+    if matches.contains(b"BM") {
         return RealFileType::Image;
     }
     return RealFileType::Unknown;
 }
 
-fn check_webp(contents: &[u8]) -> RealFileType {
+fn check_webp(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Container is RIFF; the format tag "WEBP" sits at byte offset 8, not 0.
     if contents.len() >= 12 {
         let riff = contents[0] == b'R'
@@ -1150,13 +1193,13 @@ fn check_webp(contents: &[u8]) -> RealFileType {
             return RealFileType::Image;
         }
     }
-    if scan_for_at_offset(contents, b"RIFF", 8, b"WEBP") {
+    if matches.contains_at_offset(b"RIFF", 8, b"WEBP") {
         return RealFileType::Image;
     }
     return RealFileType::Unknown;
 }
 
-fn check_tiff(contents: &[u8]) -> RealFileType {
+fn check_tiff(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // TIFF has two magic-byte variants depending on the byte order the
     // rest of the file's fields are stored in: "II" (little-endian,
     // "Intel") or "MM" (big-endian, "Motorola"), each followed by the
@@ -1175,13 +1218,13 @@ fn check_tiff(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Image;
     }
-    if scan_for(contents, &little_endian) || scan_for(contents, &big_endian) {
+    if matches.contains(&little_endian) || matches.contains(&big_endian) {
         return RealFileType::Image;
     }
     return RealFileType::Unknown;
 }
 
-fn check_wav(contents: &[u8]) -> RealFileType {
+fn check_wav(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Container is RIFF; the format tag "WAVE" sits at byte offset 8.
     if contents.len() >= 12 {
         let riff = contents[0] == b'R'
@@ -1196,13 +1239,13 @@ fn check_wav(contents: &[u8]) -> RealFileType {
             return RealFileType::Audio;
         }
     }
-    if scan_for_at_offset(contents, b"RIFF", 8, b"WAVE") {
+    if matches.contains_at_offset(b"RIFF", 8, b"WAVE") {
         return RealFileType::Audio;
     }
     return RealFileType::Unknown;
 }
 
-fn check_flac(contents: &[u8]) -> RealFileType {
+fn check_flac(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4
         && contents[0] == b'f'
         && contents[1] == b'L'
@@ -1211,13 +1254,13 @@ fn check_flac(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Audio;
     }
-    if scan_for(contents, b"fLaC") {
+    if matches.contains(b"fLaC") {
         return RealFileType::Audio;
     }
     return RealFileType::Unknown;
 }
 
-fn check_ogg(contents: &[u8]) -> RealFileType {
+fn check_ogg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4
         && contents[0] == b'O'
         && contents[1] == b'g'
@@ -1226,7 +1269,7 @@ fn check_ogg(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Audio;
     }
-    if scan_for(contents, b"OggS") {
+    if matches.contains(b"OggS") {
         return RealFileType::Audio;
     }
     return RealFileType::Unknown;
@@ -1336,14 +1379,14 @@ fn has_consecutive_mp3_frames(contents: &[u8], start: usize) -> bool {
     mp3_frame_size(next).is_some()
 }
 
-fn check_mp3(contents: &[u8]) -> RealFileType {
+fn check_mp3(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // MP3 has no single reliable signature: it's either an ID3v2 tag up
     // front, or -- lacking a tag -- a chain of frame headers whose sizes
     // line up (see has_consecutive_mp3_frames above).
     if contents.len() >= 3 && contents[0] == b'I' && contents[1] == b'D' && contents[2] == b'3' {
         return RealFileType::Audio;
     }
-    if scan_for(contents, b"ID3") {
+    if matches.contains(b"ID3") {
         return RealFileType::Audio;
     }
     for i in 0..contents.len() {
@@ -1354,7 +1397,7 @@ fn check_mp3(contents: &[u8]) -> RealFileType {
     return RealFileType::Unknown;
 }
 
-fn check_mp4(contents: &[u8]) -> RealFileType {
+fn check_mp4(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // The "ftyp" box sits at byte offset 4, not 0 -- the first 4 bytes are
     // just the box's size field.
     if contents.len() >= 8
@@ -1365,13 +1408,13 @@ fn check_mp4(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Video;
     }
-    if scan_for(contents, b"ftyp") {
+    if matches.contains(b"ftyp") {
         return RealFileType::Video;
     }
     return RealFileType::Unknown;
 }
 
-fn check_webm(contents: &[u8]) -> RealFileType {
+fn check_webm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // WebM and Matroska (.mkv) share this same EBML container magic;
     // telling them apart needs more than the first 4 bytes.
     let sig = [0x1A, 0x45, 0xDF, 0xA3];
@@ -1383,13 +1426,13 @@ fn check_webm(contents: &[u8]) -> RealFileType {
     {
         return RealFileType::Video;
     }
-    if scan_for(contents, &sig) {
+    if matches.contains(&sig) {
         return RealFileType::Video;
     }
     return RealFileType::Unknown;
 }
 
-fn check_avi(contents: &[u8]) -> RealFileType {
+fn check_avi(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Container is RIFF; the format tag "AVI " sits at byte offset 8.
     if contents.len() >= 12 {
         let riff = contents[0] == b'R'
@@ -1404,7 +1447,7 @@ fn check_avi(contents: &[u8]) -> RealFileType {
             return RealFileType::Video;
         }
     }
-    if scan_for_at_offset(contents, b"RIFF", 8, b"AVI ") {
+    if matches.contains_at_offset(b"RIFF", 8, b"AVI ") {
         return RealFileType::Video;
     }
     return RealFileType::Unknown;
@@ -1414,6 +1457,13 @@ fn check_avi(contents: &[u8]) -> RealFileType {
 mod tests {
     use super::*;
     use crate::types::FileInfo;
+
+    // Direct check_* calls in these tests need a MagicMatches built from
+    // the same bytes they're testing, same as identify_real_filetype
+    // builds one from the real file before calling any check_*.
+    fn matches_for(contents: &[u8]) -> MagicMatches {
+        MagicMatches::scan(contents)
+    }
 
     // identify_type now takes an &mut ErratasJob and mutates it in
     // place rather than taking raw bytes directly -- this builds the
@@ -1478,15 +1528,18 @@ mod tests {
 
     #[test]
     fn check_elf_does_not_panic_on_files_under_4_bytes() {
-        assert_eq!(check_elf(&[]), None);
-        assert_eq!(check_elf(&[0x7F, 0x45]), None);
+        assert_eq!(check_elf(&[], &matches_for(&[])), None);
+        assert_eq!(
+            check_elf(&[0x7F, 0x45], &matches_for(&[0x7F, 0x45])),
+            None
+        );
     }
 
     #[test]
     fn check_elf_finds_shifted_magic_via_fallback_scan() {
         let mut contents = vec![0x90; 32];
         contents.extend_from_slice(&elf_header(2, false));
-        assert_eq!(check_elf(&contents), Some(32));
+        assert_eq!(check_elf(&contents, &matches_for(&contents)), Some(32));
     }
 
     #[test]
@@ -1538,34 +1591,46 @@ mod tests {
         );
     }
 
-    // --- scan_for / scan_for_at_offset --------------------------------
+    // --- MagicMatches (replaces the old scan_for / scan_for_at_offset) --
     // These back nearly every format's shifted/carved fallback path, but
     // had no direct coverage of their own -- only ever exercised
-    // indirectly through whichever check_* happened to call them.
+    // indirectly through whichever check_* happened to call them. Built
+    // against a small, test-only pattern set via scan_with rather than
+    // the real production MAGIC_PATTERNS, so these stay independent of
+    // the real magic-byte list.
+    fn test_matches(contents: &[u8], patterns: &[&'static [u8]]) -> MagicMatches {
+        let ac = AhoCorasick::new(patterns).unwrap();
+        MagicMatches::scan_with(&ac, patterns, contents)
+    }
 
     #[test]
     fn scan_for_finds_pattern_in_the_middle() {
-        assert!(scan_for(b"....needle....", b"needle"));
+        let m = test_matches(b"....needle....", &[b"needle"]);
+        assert!(m.contains(b"needle"));
     }
 
     #[test]
     fn scan_for_finds_pattern_at_the_very_end() {
-        assert!(scan_for(b"....needle", b"needle"));
+        let m = test_matches(b"....needle", &[b"needle"]);
+        assert!(m.contains(b"needle"));
     }
 
     #[test]
     fn scan_for_false_when_pattern_absent() {
-        assert!(!scan_for(b"nothing to see here", b"needle"));
+        let m = test_matches(b"nothing to see here", &[b"needle"]);
+        assert!(!m.contains(b"needle"));
     }
 
     #[test]
     fn scan_for_false_for_empty_pattern() {
-        assert!(!scan_for(b"anything", b""));
+        let m = test_matches(b"anything", &[b"needle"]);
+        assert!(!m.contains(b""));
     }
 
     #[test]
     fn scan_for_false_when_pattern_longer_than_contents() {
-        assert!(!scan_for(b"short", b"way too long a needle"));
+        let m = test_matches(b"short", &[b"way too long a needle"]);
+        assert!(!m.contains(b"way too long a needle"));
     }
 
     #[test]
@@ -1574,7 +1639,8 @@ mod tests {
         let mut contents = b"RIFF".to_vec();
         contents.extend_from_slice(&[0u8; 4]); // 4 bytes of chunk size filler
         contents.extend_from_slice(b"WAVE");
-        assert!(scan_for_at_offset(&contents, b"RIFF", 8, b"WAVE"));
+        let m = test_matches(&contents, &[b"RIFF", b"WAVE"]);
+        assert!(m.contains_at_offset(b"RIFF", 8, b"WAVE"));
     }
 
     #[test]
@@ -1582,25 +1648,72 @@ mod tests {
         let mut contents = b"RIFF".to_vec();
         contents.extend_from_slice(&[0u8; 4]);
         contents.extend_from_slice(b"AVI ");
-        assert!(!scan_for_at_offset(&contents, b"RIFF", 8, b"WAVE"));
+        let m = test_matches(&contents, &[b"RIFF", b"WAVE", b"AVI "]);
+        assert!(!m.contains_at_offset(b"RIFF", 8, b"WAVE"));
     }
 
     #[test]
     fn scan_for_at_offset_false_when_anchor_absent() {
-        assert!(!scan_for_at_offset(b"no anchor here", b"RIFF", 8, b"WAVE"));
+        let m = test_matches(b"no anchor here", &[b"RIFF", b"WAVE"]);
+        assert!(!m.contains_at_offset(b"RIFF", 8, b"WAVE"));
     }
 
     #[test]
     fn scan_for_at_offset_false_when_gap_runs_past_end() {
         // Anchor matches right at the end, leaving no room for the tag.
-        assert!(!scan_for_at_offset(b"....RIFF", b"RIFF", 8, b"WAVE"));
+        let m = test_matches(b"....RIFF", &[b"RIFF", b"WAVE"]);
+        assert!(!m.contains_at_offset(b"RIFF", 8, b"WAVE"));
+    }
+
+    // --- MAGIC_PATTERNS / MAGIC_AC (the real, shared production automaton,
+    // as opposed to the test-only ones above) --------------------------
+
+    #[test]
+    fn magic_patterns_has_no_duplicate_entries() {
+        // Each entry should back exactly one HashMap key in MagicMatches --
+        // a duplicate wouldn't break anything (both would map to the same
+        // key), but it would mean two check_*'s doc comments think they
+        // "own" a pattern that's actually declared twice, so this is worth
+        // catching on its own.
+        let mut seen = std::collections::HashSet::new();
+        for pattern in MAGIC_PATTERNS {
+            assert!(
+                seen.insert(*pattern),
+                "duplicate pattern in MAGIC_PATTERNS: {pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn magic_matches_scan_finds_several_formats_markers_in_one_pass() {
+        // The whole point of #27's fix: one MagicMatches::scan call should
+        // surface hits for entirely unrelated formats' patterns out of a
+        // single buffer, rather than needing a separate scan per pattern.
+        let mut contents = b"junk-prefix-".to_vec();
+        contents.extend_from_slice(b"%PDF-"); // PDF
+        contents.extend_from_slice(b"...junk-between...");
+        contents.extend_from_slice(b"fLaC"); // FLAC
+        contents.extend_from_slice(b"...more-junk...");
+        contents.extend_from_slice(&[0xFF, 0xD8, 0xFF]); // JPEG
+
+        let m = MagicMatches::scan(&contents);
+        assert!(m.contains(b"%PDF-"));
+        assert!(m.contains(b"fLaC"));
+        assert!(m.contains(&[0xFF, 0xD8, 0xFF]));
+        // Something that was never in the buffer at all should still
+        // cleanly report absent, not panic on an unrecognized pattern.
+        assert!(!m.contains(b"ITSF"));
     }
 
     // --- check_winexe ----------------------------------------------------
 
     #[test]
     fn check_winexe_reports_unknown_under_64_bytes() {
-        assert_eq!(check_winexe(&[0x4D, 0x5A]).unwrap(), RealFileType::Unknown);
+        let contents = [0x4D, 0x5A];
+        assert_eq!(
+            check_winexe(&contents, &matches_for(&contents)).unwrap(),
+            RealFileType::Unknown
+        );
     }
 
     #[test]
@@ -1613,7 +1726,7 @@ mod tests {
         contents[0x3C + 2] = 0x00;
         contents[0x3C + 3] = 0x00;
         assert_eq!(
-            check_winexe(&contents).unwrap(),
+            check_winexe(&contents, &matches_for(&contents)).unwrap(),
             RealFileType::WinExecutable
         );
     }
@@ -1623,7 +1736,10 @@ mod tests {
         let mut contents = vec![0u8; 64];
         contents[0] = 0x4D;
         contents[1] = 0x5A;
-        assert_eq!(check_winexe(&contents).unwrap(), RealFileType::Unknown);
+        assert_eq!(
+            check_winexe(&contents, &matches_for(&contents)).unwrap(),
+            RealFileType::Unknown
+        );
     }
 
     #[test]
@@ -1639,7 +1755,7 @@ mod tests {
         contents[102] = 0x00;
         contents[103] = 0x00;
         assert_eq!(
-            check_winexe(&contents).unwrap(),
+            check_winexe(&contents, &matches_for(&contents)).unwrap(),
             RealFileType::WinExecutable
         );
     }
@@ -1669,8 +1785,9 @@ mod tests {
     #[test]
     fn check_dll_detects_the_image_file_dll_characteristic() {
         const IMAGE_FILE_DLL: u16 = 0x2000;
+        let contents = dll_header(IMAGE_FILE_DLL);
         assert_eq!(
-            check_dll(&dll_header(IMAGE_FILE_DLL)),
+            check_dll(&contents, &matches_for(&contents)),
             RealFileType::WinExecutable
         );
     }
@@ -1679,7 +1796,11 @@ mod tests {
     fn check_dll_is_unknown_without_the_dll_characteristic() {
         // IMAGE_FILE_EXECUTABLE_IMAGE, not IMAGE_FILE_DLL -- a normal EXE's
         // flag, not a library's.
-        assert_eq!(check_dll(&dll_header(0x0002)), RealFileType::Unknown);
+        let contents = dll_header(0x0002);
+        assert_eq!(
+            check_dll(&contents, &matches_for(&contents)),
+            RealFileType::Unknown
+        );
     }
 
     #[test]
@@ -1709,40 +1830,45 @@ mod tests {
 
     #[test]
     fn ooxml_subtype_detects_docx() {
+        let contents = ooxml_bytes(b"word/document.xml");
         assert_eq!(
-            ooxml_subtype(&ooxml_bytes(b"word/document.xml")),
+            ooxml_subtype(&matches_for(&contents)),
             DocumentSubType::DOCX
         );
     }
 
     #[test]
     fn ooxml_subtype_detects_xlsx() {
+        let contents = ooxml_bytes(b"xl/workbook.xml");
         assert_eq!(
-            ooxml_subtype(&ooxml_bytes(b"xl/workbook.xml")),
+            ooxml_subtype(&matches_for(&contents)),
             DocumentSubType::XLSX
         );
     }
 
     #[test]
     fn ooxml_subtype_detects_xlsb_as_xlsx() {
+        let contents = ooxml_bytes(b"xl/workbook.bin");
         assert_eq!(
-            ooxml_subtype(&ooxml_bytes(b"xl/workbook.bin")),
+            ooxml_subtype(&matches_for(&contents)),
             DocumentSubType::XLSX
         );
     }
 
     #[test]
     fn ooxml_subtype_detects_pptx() {
+        let contents = ooxml_bytes(b"ppt/presentation.xml");
         assert_eq!(
-            ooxml_subtype(&ooxml_bytes(b"ppt/presentation.xml")),
+            ooxml_subtype(&matches_for(&contents)),
             DocumentSubType::PPTX
         );
     }
 
     #[test]
     fn ooxml_subtype_falls_back_to_generic_when_unrecognized() {
+        let contents = ooxml_bytes(b"some/other/entry.xml");
         assert_eq!(
-            ooxml_subtype(&ooxml_bytes(b"some/other/entry.xml")),
+            ooxml_subtype(&matches_for(&contents)),
             DocumentSubType::OOXML
         );
     }
@@ -2028,14 +2154,20 @@ mod tests {
         let mut contents = vec![0u8; 64];
         contents[0] = 0xFF;
         contents[1] = 0xE6; // top 3 bits set, matches the old loose check
-        assert_eq!(check_mp3(&contents), RealFileType::Unknown);
+        assert_eq!(
+            check_mp3(&contents, &matches_for(&contents)),
+            RealFileType::Unknown
+        );
     }
 
     #[test]
     fn check_mp3_detects_a_real_id3_tagged_file() {
         let mut contents = b"ID3".to_vec();
         contents.extend_from_slice(&[0u8; 61]);
-        assert_eq!(check_mp3(&contents), RealFileType::Audio);
+        assert_eq!(
+            check_mp3(&contents, &matches_for(&contents)),
+            RealFileType::Audio
+        );
     }
 
     #[test]
@@ -2043,7 +2175,10 @@ mod tests {
         let mut contents = vec![0u8; MP3_FRAME_SIZE + MP3_HEADER.len()];
         contents[0..4].copy_from_slice(&MP3_HEADER);
         contents[MP3_FRAME_SIZE..MP3_FRAME_SIZE + 4].copy_from_slice(&MP3_HEADER);
-        assert_eq!(check_mp3(&contents), RealFileType::Audio);
+        assert_eq!(
+            check_mp3(&contents, &matches_for(&contents)),
+            RealFileType::Audio
+        );
     }
 
     // --- check_tiff (#38) -----------------------------------------------
@@ -2051,33 +2186,48 @@ mod tests {
     #[test]
     fn check_tiff_detects_little_endian_magic() {
         let contents = vec![0x49, 0x49, 0x2A, 0x00];
-        assert_eq!(check_tiff(&contents), RealFileType::Image);
+        assert_eq!(
+            check_tiff(&contents, &matches_for(&contents)),
+            RealFileType::Image
+        );
     }
 
     #[test]
     fn check_tiff_detects_big_endian_magic() {
         let contents = vec![0x4D, 0x4D, 0x00, 0x2A];
-        assert_eq!(check_tiff(&contents), RealFileType::Image);
+        assert_eq!(
+            check_tiff(&contents, &matches_for(&contents)),
+            RealFileType::Image
+        );
     }
 
     #[test]
     fn check_tiff_is_unknown_without_either_magic() {
         let contents = vec![0x00, 0x00, 0x00, 0x00];
-        assert_eq!(check_tiff(&contents), RealFileType::Unknown);
+        assert_eq!(
+            check_tiff(&contents, &matches_for(&contents)),
+            RealFileType::Unknown
+        );
     }
 
     #[test]
     fn check_tiff_finds_shifted_little_endian_magic_via_fallback_scan() {
         let mut contents = vec![0x90; 32];
         contents.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]);
-        assert_eq!(check_tiff(&contents), RealFileType::Image);
+        assert_eq!(
+            check_tiff(&contents, &matches_for(&contents)),
+            RealFileType::Image
+        );
     }
 
     #[test]
     fn check_tiff_finds_shifted_big_endian_magic_via_fallback_scan() {
         let mut contents = vec![0x90; 32];
         contents.extend_from_slice(&[0x4D, 0x4D, 0x00, 0x2A]);
-        assert_eq!(check_tiff(&contents), RealFileType::Image);
+        assert_eq!(
+            check_tiff(&contents, &matches_for(&contents)),
+            RealFileType::Image
+        );
     }
 
     #[test]
@@ -2088,6 +2238,75 @@ mod tests {
         assert_eq!(
             result.file_info.file_sub_type,
             vec![RealFileSubType::Image(ImageSubType::TIFF)]
+        );
+    }
+
+    // --- contains_at_offset fallback (check_webp / check_wav / check_avi)
+    // -- the one part of the new MagicMatches API with no direct coverage
+    // yet: RIFF-tag-at-a-fixed-gap formats, shifted past where the fast
+    // fixed-offset path looks.
+
+    #[test]
+    fn check_webp_finds_shifted_riff_webp_via_fallback_scan() {
+        let mut contents = vec![0x90; 20];
+        contents.extend_from_slice(b"RIFF");
+        contents.extend_from_slice(&[0u8; 4]); // chunk size filler
+        contents.extend_from_slice(b"WEBP");
+        assert_eq!(
+            check_webp(&contents, &matches_for(&contents)),
+            RealFileType::Image
+        );
+    }
+
+    #[test]
+    fn check_wav_finds_shifted_riff_wave_via_fallback_scan() {
+        let mut contents = vec![0x90; 20];
+        contents.extend_from_slice(b"RIFF");
+        contents.extend_from_slice(&[0u8; 4]);
+        contents.extend_from_slice(b"WAVE");
+        assert_eq!(
+            check_wav(&contents, &matches_for(&contents)),
+            RealFileType::Audio
+        );
+    }
+
+    #[test]
+    fn check_avi_finds_shifted_riff_avi_via_fallback_scan() {
+        let mut contents = vec![0x90; 20];
+        contents.extend_from_slice(b"RIFF");
+        contents.extend_from_slice(&[0u8; 4]);
+        contents.extend_from_slice(b"AVI ");
+        assert_eq!(
+            check_avi(&contents, &matches_for(&contents)),
+            RealFileType::Video
+        );
+    }
+
+    #[test]
+    fn check_webp_does_not_match_wave_at_the_right_gap() {
+        // RIFF + WAVE at the right offset should not satisfy a WEBP check --
+        // contains_at_offset needs the *specific* tag, not just any tag.
+        let mut contents = vec![0x90; 20];
+        contents.extend_from_slice(b"RIFF");
+        contents.extend_from_slice(&[0u8; 4]);
+        contents.extend_from_slice(b"WAVE");
+        assert_eq!(
+            check_webp(&contents, &matches_for(&contents)),
+            RealFileType::Unknown
+        );
+    }
+
+    // --- check_dmg's fallback (koly trailer pushed out of the last 512
+    // bytes by data appended after it) --------------------------------
+
+    #[test]
+    fn check_dmg_finds_koly_via_fallback_scan_when_trailer_is_not_in_the_last_512_bytes() {
+        let mut contents = vec![0x90; 20];
+        contents.extend_from_slice(b"koly");
+        contents.extend_from_slice(&[0x90; 600]); // pushes "koly" out of the last 512 bytes
+        assert_eq!(
+            check_dmg(&contents, &matches_for(&contents)),
+            RealFileType::Archive
         );
     }
 }
