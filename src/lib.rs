@@ -14,12 +14,13 @@ use crate::{
     types::{ErratasJob, FileInfo},
 };
 
-pub mod consts;
-pub mod content;
-pub mod error;
-pub mod files;
-pub mod malware;
-pub mod types;
+mod consts;
+mod content;
+mod error;
+mod files;
+mod malware;
+mod server;
+mod types;
 
 pub fn scan(path: &str) -> ErratasJob {
     match load_file(path) {
@@ -77,4 +78,8 @@ fn load_file(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
         },
     };
     Ok(erratas_job)
+}
+
+pub fn spawn_server(ip: String, port: u16) -> Result<(), Box<dyn Error>> {
+    server::serve(&ip, port)
 }
