@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Debug)]
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
 pub struct FileInfo {
     pub contents: Vec<u8>,
     pub bad_language: bool,
@@ -14,18 +16,18 @@ pub struct FileInfo {
     pub file_sub_type: Vec<RealFileSubType>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ErratasJob {
     pub file_info: FileInfo,
     //pub yara_results: Vec<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum UnknownSubType {
     Unknown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum RealFileType {
     Image,
     Video,
@@ -38,7 +40,7 @@ pub enum RealFileType {
     Unknown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum ImageSubType {
     PNG,
     JPEG,
@@ -48,14 +50,14 @@ pub enum ImageSubType {
     TIFF,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum VideoSubType {
     MP4,
     WEBM,
     AVI,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum AudioSubType {
     WAV,
     FLAC,
@@ -63,7 +65,7 @@ pub enum AudioSubType {
     MP3,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum DocumentSubType {
     DOC,
     DOCX,
@@ -77,7 +79,7 @@ pub enum DocumentSubType {
     CHM,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum ArchiveSubType {
     ZIP,
     TAR,
@@ -88,7 +90,7 @@ pub enum ArchiveSubType {
     ISO,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum ExecutableSubType {
     ELF,
     PE,
@@ -98,7 +100,7 @@ pub enum ExecutableSubType {
     LNK,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum RealFileSubType {
     Unknown(UnknownSubType),
     Image(ImageSubType),

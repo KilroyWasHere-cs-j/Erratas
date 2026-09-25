@@ -14,17 +14,17 @@ use crate::{
     types::{ErratasJob, FileInfo},
 };
 
-pub mod consts;
-pub mod content;
-pub mod error;
-pub mod files;
+mod consts;
+mod content;
+mod files;
 pub mod malware;
+mod server;
 pub mod types;
 
 pub fn scan(path: &str) -> ErratasJob {
     match load_file(path) {
         Ok(mut erratas_job) => {
-            println!("Begining scanning");
+            println!("Beginning scanning");
             identify_real_filetype(&mut erratas_job);
             println!("Yara results {:?}", yara_scan(&mut erratas_job));
             match scan_content(&mut erratas_job) {
@@ -77,4 +77,8 @@ fn load_file(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
         },
     };
     Ok(erratas_job)
+}
+
+pub fn spawn_server(ip: String, port: u16) -> Result<(), Box<dyn Error>> {
+    server::serve(&ip, port)
 }
