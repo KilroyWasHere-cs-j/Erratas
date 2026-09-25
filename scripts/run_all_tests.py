@@ -30,6 +30,16 @@ strike3/ as one combined suite:
                                  then runs erratas against each and checks
                                  the strike3 field in its output actually
                                  fired.
+  4. Server mode              -- starts `erratas host 127.0.0.1 <port>` as
+                                 a real subprocess and talks to it over TCP
+                                 the way an outside caller would: uploads
+                                 each format fixture and checks the JSON
+                                 scan result, checks a strike3 image trips
+                                 the content scan, that oversized and
+                                 cut-short uploads are handled, that the
+                                 server survives a bad client, that
+                                 overlapping uploads all succeed, and that
+                                 no upload-*.bin files are left behind.
 
 Each phase reports its own pass/fail tally; the script's exit code is
 nonzero if anything, anywhere, failed.
@@ -39,9 +49,15 @@ Usage: python3 scripts/run_all_tests.py
 
 from __future__ import annotations
 
+import json
 import re
+import socket
+import struct
 import subprocess
 import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -477,6 +493,223 @@ def phase_strike3(bin_path: Path) -> bool:
     return ocr_ok and detect_ok
 
 
+# --- Phase 4: server mode --------------------------------------------------
+
+# Mirrors src/server.rs's MAX_UPLOAD -- anything above this must be refused.
+SERVER_MAX_UPLOAD = 100 * 1024 * 1024
+SERVER_HOST = "127.0.0.1"
+
+# Per-request socket timeout. Generous because the server compiles the
+# YARA rules on its first scan.
+SERVER_TIMEOUT = 60
+
+
+def free_port() -> int:
+    """Asks the OS for a free port. Tiny window where something else could
+    grab it before the server binds, but fine for a test run."""
+    with socket.socket() as s:
+        s.bind((SERVER_HOST, 0))
+        return s.getsockname()[1]
+
+
+def wait_for_server(port: int, proc: subprocess.Popen, deadline_s: float = 10) -> bool:
+    """Polls until the server accepts a connection, or gives up. Bails out
+    early if the process already died (e.g. the port was taken)."""
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            # Connect-and-close counts as a client that sent nothing; the
+            # server just logs an EOF error for it and keeps going.
+            with socket.create_connection((SERVER_HOST, port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def recv_all(sock: socket.socket) -> bytes:
+    """Reads until the server closes the connection -- it closes after
+    every reply, so that's where a response ends."""
+    chunks = []
+    while chunk := sock.recv(65536):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def server_upload(port: int, body: bytes) -> str:
+    """Sends one well-formed upload: 8-byte big-endian length, then the
+    bytes. Returns the server's full reply as text."""
+    with socket.create_connection((SERVER_HOST, port), timeout=SERVER_TIMEOUT) as sock:
+        sock.sendall(struct.pack(">Q", len(body)) + body)
+        return recv_all(sock).decode("utf-8", errors="replace")
+
+
+def parse_upload_reply(reply: str, expected_len: int) -> tuple[str | None, dict | None, str]:
+    """Splits a reply into (saved path, parsed scan JSON, problem). Problem
+    is "" when both lines look right."""
+    lines = reply.splitlines()
+    if not lines:
+        return None, None, "empty reply"
+
+    # Line 1: "OK <n> bytes saved to <path>"
+    ok_prefix = f"OK {expected_len} bytes saved to "
+    if not lines[0].startswith(ok_prefix):
+        return None, None, f"bad ack line: {lines[0]!r}"
+    saved = lines[0][len(ok_prefix):].strip()
+
+    # Line 2: the scan result, which must be plain JSON.
+    if len(lines) < 2:
+        return saved, None, "no scan result line"
+    try:
+        return saved, json.loads(lines[1]), ""
+    except json.JSONDecodeError as e:
+        return saved, None, f"scan line isn't JSON ({e}): {lines[1][:120]!r}"
+
+
+def remove_upload(saved: str | None) -> None:
+    """Server saves relative to its cwd (REPO_ROOT), so resolve from there."""
+    if saved:
+        (REPO_ROOT / saved).unlink(missing_ok=True)
+
+
+def phase_server(bin_path: Path) -> bool:
+    header("Phase 4: server mode (erratas host)")
+    tally = Tally("server mode")
+    port = free_port()
+
+    # Snapshot existing uploads so the leftover check at the end only
+    # flags files *this* run created.
+    uploads_before = set(REPO_ROOT.glob("upload-*.bin"))
+
+    # stdout/stderr go to a temp file, not a pipe: the server prints on
+    # every scan, and a pipe nobody reads fills up and stalls it. cwd is
+    # REPO_ROOT because build_yara_rules() loads "rules/" relative to it.
+    log = tempfile.TemporaryFile(mode="w+")
+    proc = subprocess.Popen(
+        [str(bin_path), "host", SERVER_HOST, str(port)],
+        cwd=REPO_ROOT,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+    try:
+        if not wait_for_server(port, proc):
+            log.seek(0)
+            tally.record(False, "server start", f"not listening on {port}\n{log.read()[-2000:]}")
+            return tally.summary()
+        tally.record(True, "server start", f"listening on {SERVER_HOST}:{port}")
+
+        # --- every format fixture, over the wire ---
+        # Same fixtures Phase 1 uses via the CLI; here the check is that
+        # the JSON result reports a real type, not "Unknown".
+        for path in sorted(generate_format_fixtures("normal")):
+            body = path.read_bytes()
+            try:
+                saved, result, problem = parse_upload_reply(server_upload(port, body), len(body))
+            except OSError as e:
+                tally.record(False, f"upload {path.name}", f"socket error: {e}")
+                continue
+            remove_upload(saved)
+
+            if problem:
+                tally.record(False, f"upload {path.name}", problem)
+                continue
+            file_types = result.get("file_info", {}).get("file_type", [])
+            detected = [t for t in file_types if t != "Unknown"]
+            tally.record(bool(detected), f"upload {path.name}", f"file_type={file_types}")
+
+        # --- content scan runs server-side too ---
+        # One strike3 image is enough to prove OCR + blocklist fire
+        # through the server path; Phase 3 covers the full list.
+        terms = load_strike3_terms()
+        if terms:
+            [(term, img)] = generate_strike3_images(terms[:1])
+            body = img.read_bytes()
+            try:
+                saved, result, problem = parse_upload_reply(server_upload(port, body), len(body))
+                remove_upload(saved)
+                strike3 = (result or {}).get("file_info", {}).get("strike3", [])
+                tally.record(not problem and bool(strike3), f"strike3 via server ({term})",
+                             problem or f"strike3={strike3}")
+            except OSError as e:
+                tally.record(False, f"strike3 via server ({term})", f"socket error: {e}")
+
+        # --- oversized upload refused from the header alone ---
+        # No body is sent: a reply at all proves the server didn't wait on one.
+        try:
+            with socket.create_connection((SERVER_HOST, port), timeout=SERVER_TIMEOUT) as sock:
+                sock.sendall(struct.pack(">Q", SERVER_MAX_UPLOAD + 1))
+                reply = recv_all(sock).decode()
+            tally.record(reply == "ERR too large\n", "oversized upload rejected", repr(reply))
+        except OSError as e:
+            tally.record(False, "oversized upload rejected", f"socket error: {e}")
+
+        # --- cut-short upload gets no ack ---
+        # Promise 100 bytes, send 10, close our write side.
+        try:
+            with socket.create_connection((SERVER_HOST, port), timeout=SERVER_TIMEOUT) as sock:
+                sock.sendall(struct.pack(">Q", 100) + b"\xab" * 10)
+                sock.shutdown(socket.SHUT_WR)
+                reply = recv_all(sock)
+            tally.record(reply == b"", "cut-short upload gets no ack", repr(reply[:80]))
+        except OSError as e:
+            tally.record(False, "cut-short upload gets no ack", f"socket error: {e}")
+
+        # --- server still alive after the bad clients above ---
+        body = b"still alive?"
+        try:
+            saved, _, problem = parse_upload_reply(server_upload(port, body), len(body))
+            remove_upload(saved)
+            tally.record(not problem and proc.poll() is None, "server survives bad clients", problem)
+        except OSError as e:
+            tally.record(False, "server survives bad clients", f"socket error: {e}")
+
+        # --- overlapping uploads ---
+        # Different sizes per client so a mixed-up reply would show up as
+        # a wrong byte count in the ack line.
+        bodies = [bytes([0x41 + i]) * (512 * (i + 1)) for i in range(4)]
+        with ThreadPoolExecutor(max_workers=len(bodies)) as pool:
+            replies = list(pool.map(lambda b: server_upload(port, b), bodies))
+
+        saved_paths = []
+        concurrent_problems = []
+        for body, reply in zip(bodies, replies):
+            saved, _, problem = parse_upload_reply(reply, len(body))
+            saved_paths.append(saved)
+            remove_upload(saved)
+            if problem:
+                concurrent_problems.append(problem)
+
+        # Distinct paths -> no two uploads landed on the same file.
+        if len(set(saved_paths)) != len(bodies):
+            concurrent_problems.append(f"paths not unique: {saved_paths}")
+        tally.record(not concurrent_problems, f"{len(bodies)} overlapping uploads",
+                     "; ".join(concurrent_problems))
+
+        # --- nothing left on disk ---
+        # Everything this phase knew about was removed above, so anything
+        # new here is a file the server itself should have cleaned up
+        # (e.g. the cut-short upload).
+        leftovers = set(REPO_ROOT.glob("upload-*.bin")) - uploads_before
+        for leftover in leftovers:
+            leftover.unlink(missing_ok=True)
+        tally.record(not leftovers, "no leftover upload files",
+                     ", ".join(p.name for p in sorted(leftovers)))
+
+    finally:
+        # Server loops forever; stop it whatever happened above.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+
+    return tally.summary()
+
+
 # --- main ------------------------------------------------------------------
 
 
@@ -502,6 +735,7 @@ def main() -> int:
     results["format detection (shifted)"] = phase_format_detection("shifted", bin_path)
     results["YARA fixtures"] = phase_yara_examples(yara_bin_path)
     results["strike3"] = phase_strike3(bin_path)
+    results["server mode"] = phase_server(bin_path)
 
     header("Overall summary")
     all_ok = True

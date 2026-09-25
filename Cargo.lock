@@ -1191,6 +1191,7 @@ dependencies = [
  "quick-xml 0.42.0",
  "rustrict",
  "serde",
+ "serde_json",
  "tesseract",
  "yara-x",
  "zip",

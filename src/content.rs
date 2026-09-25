@@ -28,7 +28,7 @@ fn has_bad_text(text: &str) -> bool {
     text.is(Type::PROFANE | Type::OFFENSIVE | Type::SEXUAL)
 }
 
-pub fn pii() {}
+pub fn _pii() {}
 
 fn match_against_strike3_black_list(text: &str) -> Vec<String> {
     let lowercase_text = text.to_lowercase();

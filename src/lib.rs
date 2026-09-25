@@ -16,16 +16,15 @@ use crate::{
 
 mod consts;
 mod content;
-mod error;
 mod files;
-mod malware;
+pub mod malware;
 mod server;
-mod types;
+pub mod types;
 
 pub fn scan(path: &str) -> ErratasJob {
     match load_file(path) {
         Ok(mut erratas_job) => {
-            println!("Begining scanning");
+            println!("Beginning scanning");
             identify_real_filetype(&mut erratas_job);
             println!("Yara results {:?}", yara_scan(&mut erratas_job));
             match scan_content(&mut erratas_job) {
