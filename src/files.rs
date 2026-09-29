@@ -415,31 +415,31 @@ fn is_elf_shared_object(contents: &[u8], base: usize) -> bool {
 // untouched by any of this; it's only the "wasn't at the expected offset"
 // fallback that now consults MagicMatches instead of re-scanning.
 const MAGIC_PATTERNS: &[&[u8]] = &[
-    &[0x7F, 0x45, 0x4C, 0x46],                          // ELF
-    &[0xFE, 0xED, 0xFA, 0xCE],                          // Mach-O 32-bit LE
-    &[0xCE, 0xFA, 0xED, 0xFE],                          // Mach-O 32-bit BE
-    &[0xFE, 0xED, 0xFA, 0xCF],                          // Mach-O 64-bit LE
-    &[0xCF, 0xFA, 0xED, 0xFE],                          // Mach-O 64-bit BE
-    &[0xCA, 0xFE, 0xBA, 0xBE],                          // Mach-O fat/universal LE
-    &[0xBE, 0xBA, 0xFE, 0xCA],                          // Mach-O fat/universal BE
-    &[0x4D, 0x5A],                                      // MZ (Windows EXE/DLL/LNK precursor)
-    &[0x50, 0x45, 0x00, 0x00],                          // PE header
-    b"koly",                                            // DMG UDIF trailer
-    &[0x50, 0x4B, 0x03, 0x04],                          // ZIP local file header
-    &[0x50, 0x4B, 0x05, 0x06],                          // ZIP end-of-central-directory
-    b"[Content_Types].xml",                             // OOXML package marker
-    b"word/document.xml",                               // DOCX subtype marker
-    b"xl/workbook.xml",                                 // XLSX subtype marker
-    b"xl/workbook.bin",                                 // XLSB subtype marker
-    b"ppt/presentation.xml",                            // PPTX subtype marker
-    &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07],              // RAR
-    &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C],              // 7z
-    b"MSCF",                                            // CAB
-    b"ustar",                                           // TAR (POSIX, normally at offset 257)
-    b"CD001",                                           // ISO 9660 (normally at offset 0x8001)
-    b"%PDF-",                                           // PDF
+    &[0x7F, 0x45, 0x4C, 0x46],                         // ELF
+    &[0xFE, 0xED, 0xFA, 0xCE],                         // Mach-O 32-bit LE
+    &[0xCE, 0xFA, 0xED, 0xFE],                         // Mach-O 32-bit BE
+    &[0xFE, 0xED, 0xFA, 0xCF],                         // Mach-O 64-bit LE
+    &[0xCF, 0xFA, 0xED, 0xFE],                         // Mach-O 64-bit BE
+    &[0xCA, 0xFE, 0xBA, 0xBE],                         // Mach-O fat/universal LE
+    &[0xBE, 0xBA, 0xFE, 0xCA],                         // Mach-O fat/universal BE
+    &[0x4D, 0x5A],                                     // MZ (Windows EXE/DLL/LNK precursor)
+    &[0x50, 0x45, 0x00, 0x00],                         // PE header
+    b"koly",                                           // DMG UDIF trailer
+    &[0x50, 0x4B, 0x03, 0x04],                         // ZIP local file header
+    &[0x50, 0x4B, 0x05, 0x06],                         // ZIP end-of-central-directory
+    b"[Content_Types].xml",                            // OOXML package marker
+    b"word/document.xml",                              // DOCX subtype marker
+    b"xl/workbook.xml",                                // XLSX subtype marker
+    b"xl/workbook.bin",                                // XLSB subtype marker
+    b"ppt/presentation.xml",                           // PPTX subtype marker
+    &[0x52, 0x61, 0x72, 0x21, 0x1A, 0x07],             // RAR
+    &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C],             // 7z
+    b"MSCF",                                           // CAB
+    b"ustar",                                          // TAR (POSIX, normally at offset 257)
+    b"CD001",                                          // ISO 9660 (normally at offset 0x8001)
+    b"%PDF-",                                          // PDF
     &[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1], // OLE-CFB (legacy DOC/XLS/PPT, MSI, MSG)
-    b"ITSF",                                            // CHM
+    b"ITSF",                                           // CHM
     &[
         // LNK (Windows shortcut)
         0x4C, 0x00, 0x00, 0x00, 0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00,
@@ -447,20 +447,20 @@ const MAGIC_PATTERNS: &[&[u8]] = &[
     ],
     &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], // PNG
     &[0xFF, 0xD8, 0xFF],                               // JPEG
-    b"GIF87a",                                          // GIF (87a)
-    b"GIF89a",                                          // GIF (89a)
-    b"BM",                                              // BMP
-    b"RIFF",                                            // RIFF container (WAV/WEBP/AVI, normally at offset 0)
-    b"WEBP",                                            // WebP (normally at offset 8, inside RIFF)
-    &[0x49, 0x49, 0x2A, 0x00],                         // TIFF little-endian ("II")
-    &[0x4D, 0x4D, 0x00, 0x2A],                         // TIFF big-endian ("MM")
-    b"WAVE",                                            // WAV (normally at offset 8, inside RIFF)
-    b"fLaC",                                            // FLAC
-    b"OggS",                                            // OGG
-    b"ID3",                                             // MP3 (ID3v2-tagged variant only)
-    b"ftyp",                                            // MP4 (normally at offset 4)
-    &[0x1A, 0x45, 0xDF, 0xA3],                         // WebM/Matroska (EBML)
-    b"AVI ",                                            // AVI (normally at offset 8, inside RIFF)
+    b"GIF87a",                                         // GIF (87a)
+    b"GIF89a",                                         // GIF (89a)
+    b"BM",                                             // BMP
+    b"RIFF",                   // RIFF container (WAV/WEBP/AVI, normally at offset 0)
+    b"WEBP",                   // WebP (normally at offset 8, inside RIFF)
+    &[0x49, 0x49, 0x2A, 0x00], // TIFF little-endian ("II")
+    &[0x4D, 0x4D, 0x00, 0x2A], // TIFF big-endian ("MM")
+    b"WAVE",                   // WAV (normally at offset 8, inside RIFF)
+    b"fLaC",                   // FLAC
+    b"OggS",                   // OGG
+    b"ID3",                    // MP3 (ID3v2-tagged variant only)
+    b"ftyp",                   // MP4 (normally at offset 4)
+    &[0x1A, 0x45, 0xDF, 0xA3], // WebM/Matroska (EBML)
+    b"AVI ",                   // AVI (normally at offset 8, inside RIFF)
 ];
 
 lazy_static! {
@@ -664,8 +664,7 @@ fn check_zip(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     }
     // A polyglot/dropper file (self-extracting installer, JAR, APK) has
     // real zip data starting well past offset 0 -- scan for it.
-    if matches.contains(&[0x50, 0x4B, 0x03, 0x04]) || matches.contains(&[0x50, 0x4B, 0x05, 0x06])
-    {
+    if matches.contains(&[0x50, 0x4B, 0x03, 0x04]) || matches.contains(&[0x50, 0x4B, 0x05, 0x06]) {
         return RealFileType::Archive;
     }
     return RealFileType::Unknown;
@@ -1475,7 +1474,6 @@ mod tests {
                 contents,
                 bad_language: false,
                 pii: false,
-                zipbomb: false,
                 malware: false,
                 strike3: Vec::new(),
                 hashmatches: Vec::new(),
@@ -1529,10 +1527,7 @@ mod tests {
     #[test]
     fn check_elf_does_not_panic_on_files_under_4_bytes() {
         assert_eq!(check_elf(&[], &matches_for(&[])), None);
-        assert_eq!(
-            check_elf(&[0x7F, 0x45], &matches_for(&[0x7F, 0x45])),
-            None
-        );
+        assert_eq!(check_elf(&[0x7F, 0x45], &matches_for(&[0x7F, 0x45])), None);
     }
 
     #[test]

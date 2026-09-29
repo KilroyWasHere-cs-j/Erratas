@@ -1,4 +1,5 @@
-use std::fmt;
+use std::fmt::{self, write};
+use std::ops::Range;
 
 use serde::Serialize;
 
@@ -7,11 +8,10 @@ pub struct FileInfo {
     pub contents: Vec<u8>,
     pub bad_language: bool,
     pub pii: bool,
-    pub zipbomb: bool,
     pub malware: bool,
     pub strike3: Vec<String>,
     pub hashmatches: Vec<String>,
-    pub yara_finds: Vec<String>,
+    pub yara_finds: Vec<RuleHit>,
     pub file_type: Vec<RealFileType>,
     pub file_sub_type: Vec<RealFileSubType>,
 }
@@ -111,6 +111,49 @@ pub enum RealFileSubType {
     Executable(ExecutableSubType),
 }
 
+// Owned result types: no borrows from Scanner/Rules, so these can be
+// returned, stored, or serialized after the scan is gone.
+#[derive(Debug, Serialize)]
+pub struct RuleHit {
+    pub rule: String,
+    pub namespace: String,
+    pub tags: Vec<String>,
+    pub description: Option<String>,
+    pub severity: Severity,
+    pub targets: Vec<String>,
+    pub strings: Vec<StringHit>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StringHit {
+    pub id: String,           // e.g. "$dl"
+    pub offset: Range<usize>, // where in the file it matched
+    pub preview: String,      // matched bytes, lossy UTF-8, trimmed
+}
+
+// Turning the free-text severity into an enum means a typo in a rule
+// ("hihg") shows up as Unknown instead of silently passing through.
+#[derive(Debug, Serialize, PartialEq, PartialOrd)]
+pub enum Severity {
+    Unknown,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl Severity {
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "critical" => Self::Critical,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 // Deliberately doesn't print `contents` -- that's the raw file bytes,
 // and dumping those inline is exactly what made {:?}-printing a
 // FileInfo (or anything containing one) unreadable for anything but a
@@ -131,17 +174,17 @@ impl fmt::Display for FileInfo {
             .join(", ");
         write!(
             f,
-            "{} ({}), {} bytes, PII: {}, malware: {}, zipbomb: {}, hash matches: {}, YARA finds: {}, bad language: {}, strike3: {}",
+            "{} ({}), {} bytes, PII: {}, malware: {}, hash matches: {}, YARA finds: {}, bad language: {}, strike3: {}\n yara rule hits: {:?}",
             file_types,
             file_sub_types,
             self.contents.len(),
             self.pii,
             self.malware,
-            self.zipbomb,
             self.hashmatches.len(),
             self.yara_finds.len(),
             self.bad_language,
-            self.strike3.join(", ")
+            self.strike3.join(", "),
+            self.yara_finds
         )
     }
 }

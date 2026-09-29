@@ -4,12 +4,12 @@
 //! malicious (`malware`) and whether its content trips any policy checks
 //! (`content`). Meant to be called as a CLI from any language/tool, not
 //! linked in as a library — see main.rs for the entry point.
-use files::identify_real_filetype;
 use std::error::Error;
 use std::fs;
 
 use crate::{
     content::scan_content,
+    files::identify_real_filetype,
     malware::yara_scan,
     types::{ErratasJob, FileInfo},
 };
@@ -26,7 +26,13 @@ pub fn scan(path: &str) -> ErratasJob {
         Ok(mut erratas_job) => {
             println!("Beginning scanning");
             identify_real_filetype(&mut erratas_job);
-            println!("Yara results {:?}", yara_scan(&mut erratas_job));
+            match yara_scan(&mut erratas_job) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Error: {e}");
+                }
+            }
+
             match scan_content(&mut erratas_job) {
                 Ok(_) => {}
                 Err(e) => {
@@ -46,7 +52,6 @@ pub fn scan(path: &str) -> ErratasJob {
                     contents: Vec::new(),
                     bad_language: false,
                     pii: false,
-                    zipbomb: false,
                     malware: false,
                     strike3: Vec::new(),
                     hashmatches: Vec::new(),
@@ -67,7 +72,6 @@ fn load_file(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
             contents: fs::read(path)?,
             bad_language: false,
             pii: false,
-            zipbomb: false,
             malware: false,
             strike3: Vec::new(),
             hashmatches: Vec::new(),
