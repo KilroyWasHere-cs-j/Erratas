@@ -1,4 +1,4 @@
-use std::fmt::{self, write};
+use std::fmt;
 use std::ops::Range;
 
 use serde::Serialize;
