@@ -500,7 +500,6 @@ mod tests {
                 contents,
                 bad_language: false,
                 pii: false,
-                zipbomb: false,
                 malware: false,
                 strike3: Vec::new(),
                 hashmatches: Vec::new(),
