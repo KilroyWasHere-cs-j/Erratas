@@ -1,0 +1,9 @@
+.git
+target
+resources
+strike3
+scripts
+.github
+*.md
+Containerfile
+.containerignore

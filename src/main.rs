@@ -40,16 +40,31 @@ fn main() {
     }
 }
 
+/// Scans one file and prints the result. Exits the process with code 1 if the
+/// file doesn't exist; a failed scan is printed but does not change the exit code.
+///
+/// # Arguments
+///
+/// * `file` - Path of the file to scan.
 fn cli_run(file: &str) {
     if !fs::metadata(&file).is_ok() {
         eprintln!("File {file} doesn't exist");
         process::exit(1);
     }
     println!("Scanning {}", &file);
-    let erratas_job = scan(&file);
-    println!("{}", erratas_job);
+    match scan(&file) {
+        Ok(erratas_job) => println!("{}", erratas_job),
+        Err(error) => println!("Failed to scan file {error}"),
+    }
 }
 
+/// Runs the scan server until it stops. Exits the process with code 1 if the
+/// server fails to start or dies with an error.
+///
+/// # Arguments
+///
+/// * `host` - Address to bind.
+/// * `port` - Port to listen on.
 fn hosted_run(host: String, port: u16) {
     if let Err(e) = spawn_server(host, port) {
         eprintln!("server error: {e}");
