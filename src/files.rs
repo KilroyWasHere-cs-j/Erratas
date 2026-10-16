@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::error::Error;
 
 use aho_corasick::AhoCorasick;
 use lazy_static::lazy_static;
@@ -9,6 +8,21 @@ use crate::types::{
     RealFileSubType, RealFileType, VideoSubType,
 };
 
+/// Works out what the file really is from its bytes, ignoring its name. A file
+/// can match more than one type (a self-extracting zip is both an executable and
+/// an archive), and every match is recorded.
+///
+/// The order of the checks matters: OOXML runs before ZIP, because a .docx would
+/// otherwise be reported as a plain archive.
+///
+/// # Arguments
+///
+/// * `erratas_job` - The job to read `contents` from and add results to.
+///   `file_type` and `file_sub_type` are appended to, and stay in step with each other.
+///
+/// # Returns
+///
+/// The same job. If nothing matched, both lists hold a single `Unknown`.
 pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     // One shared pass over the whole file for every fallback pattern, up
     // front -- every check_* below consults this instead of re-scanning
@@ -32,7 +46,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     }
 
     match check_winexe(&erratas_job.file_info.contents, &matches) {
-        Ok(RealFileType::WinExecutable) => {
+        RealFileType::WinExecutable => {
             erratas_job
                 .file_info
                 .file_type
@@ -42,10 +56,7 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
                 .file_sub_type
                 .push(RealFileSubType::Executable(ExecutableSubType::PE));
         }
-        Ok(_) => {}
-        Err(e) => {
-            println!("Error: {e}");
-        }
+        _ => {}
     }
 
     match check_dll(&erratas_job.file_info.contents, &matches) {
@@ -372,9 +383,17 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     return erratas_job;
 }
 
-// Returns the byte offset where the ELF magic was found, so callers (like
-// is_elf_shared_object) can read the rest of the header relative to where
-// it actually starts -- not always 0, once a fallback match is involved.
+/// Detects a Linux (ELF) executable by its 4-byte magic.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// Where the magic was found (0 normally, later for a shifted header), or
+/// `None` if it's absent. Only the first match is reported.
 fn check_elf(contents: &[u8], matches: &MagicMatches) -> Option<usize> {
     let elf_magic = [0x7F, 0x45, 0x4C, 0x46];
     if contents.len() >= 4 && contents[0..4] == elf_magic {
@@ -392,6 +411,19 @@ fn check_elf(contents: &[u8], matches: &MagicMatches) -> Option<usize> {
 // still gets its e_type read from the right place.
 const ET_DYN: u16 = 3;
 
+/// Tells a shared library (.so) from a regular ELF executable by reading the
+/// header's file-type field, honouring the file's byte order.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `base` - Where the ELF magic starts. Header fields are read relative to
+///   it so a shifted header is still read correctly.
+///
+/// # Returns
+///
+/// `true` for a shared object. Also `false` when the file is too short to hold
+/// the header field, so a truncated file reads as a plain executable.
 fn is_elf_shared_object(contents: &[u8], base: usize) -> bool {
     if contents.len() < base + 18 {
         return false;
@@ -478,13 +510,33 @@ struct MagicMatches {
 }
 
 impl MagicMatches {
+    /// Finds every known signature in the file in one pass.
+    ///
+    /// # Arguments
+    ///
+    /// * `contents` - The whole file.
+    ///
+    /// # Returns
+    ///
+    /// The positions of each pattern in `MAGIC_PATTERNS`.
     fn scan(contents: &[u8]) -> MagicMatches {
         MagicMatches::scan_with(&MAGIC_AC, MAGIC_PATTERNS, contents)
     }
 
-    // Generalized over an arbitrary automaton/pattern-list pair so the
-    // underlying multi-pattern-match mechanism can be unit-tested in
-    // isolation from the real, fixed MAGIC_PATTERNS set.
+    /// Same as `scan`, but with the automaton and pattern list passed in, so the
+    /// matching can be unit-tested without the real `MAGIC_PATTERNS`.
+    ///
+    /// # Arguments
+    ///
+    /// * `ac` - Automaton built from `patterns`.
+    /// * `patterns` - Must be the exact list `ac` was built from, in the same
+    ///   order, because matches are mapped back to patterns by index.
+    /// * `contents` - The whole file.
+    ///
+    /// # Returns
+    ///
+    /// Every pattern's start positions, in ascending order. Patterns that
+    /// never matched are present with an empty list.
     fn scan_with(ac: &AhoCorasick, patterns: &[&'static [u8]], contents: &[u8]) -> MagicMatches {
         let mut by_pattern: HashMap<&'static [u8], Vec<usize>> =
             patterns.iter().map(|p| (*p, Vec::new())).collect();
@@ -495,8 +547,16 @@ impl MagicMatches {
         MagicMatches { by_pattern }
     }
 
-    // Every position `pattern` was found at, in ascending order. Empty if
-    // `pattern` was never in the automaton's pattern list or never matched.
+    /// Looks up where a pattern was found.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - Must be one of the patterns the scan was built with.
+    ///
+    /// # Returns
+    ///
+    /// Start positions in ascending order. Empty if the pattern never matched
+    /// or wasn't in the pattern list at all.
     fn positions(&self, pattern: &[u8]) -> &[usize] {
         self.by_pattern
             .get(pattern)
@@ -504,7 +564,15 @@ impl MagicMatches {
             .unwrap_or(&[])
     }
 
-    // Direct replacement for the old scan_for(contents, pattern).
+    /// Checks whether a pattern appears anywhere in the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - Must be one of the patterns the scan was built with.
+    ///
+    /// # Returns
+    ///
+    /// `true` if found. `false` for an empty pattern or one not in the list.
     fn contains(&self, pattern: &[u8]) -> bool {
         if pattern.is_empty() {
             return false;
@@ -512,9 +580,13 @@ impl MagicMatches {
         !self.positions(pattern).is_empty()
     }
 
-    // Direct replacement for the old scan_for_at_offset(contents, anchor,
-    // gap, tag): is `tag` present at exactly `gap` bytes after some
-    // occurrence of `anchor`?
+    /// Checks that `tag` appears exactly `gap` bytes after an occurrence of
+    /// `anchor`, for formats like WebP where the tag sits inside a RIFF wrapper.
+    ///
+    /// # Arguments
+    ///
+    /// * `anchor`, `tag` - Must both be in `MAGIC_PATTERNS`, or this is always `false`.
+    /// * `gap` - Bytes from the start of `anchor` to the start of `tag`.
     fn contains_at_offset(&self, anchor: &[u8], gap: usize, tag: &[u8]) -> bool {
         self.positions(anchor)
             .iter()
@@ -531,6 +603,19 @@ const MACHO_MAGICKS: [[u8; 4]; 6] = [
     [0xBE, 0xBA, 0xFE, 0xCA],
 ];
 
+/// Detects a macOS (Mach-O) executable, 32-bit, 64-bit or fat/universal: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+/// A fat binary has the same magic as a Java .class file, so a .class file
+/// is reported as a Mac executable.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::MacExecutable` on a match, otherwise `RealFileType::Unknown`.
 fn check_macho(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4 {
         match [contents[0], contents[1], contents[2], contents[3]] {
@@ -559,9 +644,21 @@ fn check_macho(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
-fn check_winexe(contents: &[u8], matches: &MagicMatches) -> Result<RealFileType, Box<dyn Error>> {
+/// Detects a Windows executable: an `MZ` header at the start and a `PE\0\0`
+/// signature at offset 0x3C, or both signatures found anywhere in the file.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file. Under 64 bytes it is always `Unknown`.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::WinExecutable` on a match, otherwise `Unknown`. The fallback
+/// only checks that both signatures exist somewhere, not that they line up.
+fn check_winexe(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() < 64 {
-        return Ok(RealFileType::Unknown);
+        return RealFileType::Unknown;
     }
 
     // A normal executable has a MZ firstly so if it's there we done.
@@ -573,15 +670,26 @@ fn check_winexe(contents: &[u8], matches: &MagicMatches) -> Result<RealFileType,
         && contents[0x3C + 3] == 0x00;
 
     if mz && pe {
-        return Ok(RealFileType::WinExecutable);
+        return RealFileType::WinExecutable;
     }
 
     if matches.contains(&[0x4D, 0x5A]) && matches.contains(&[0x50, 0x45, 0x00, 0x00]) {
-        return Ok(RealFileType::WinExecutable);
+        return RealFileType::WinExecutable;
     }
-    return Ok(RealFileType::Unknown);
+    return RealFileType::Unknown;
 }
 
+/// Detects a macOS disk image (DMG) by its `koly` trailer, which normally sits in the last 512 bytes: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `RealFileType::Unknown`.
 fn check_dmg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // DMG has no signature at the front -- the real marker is the "koly"
     // UDIF trailer block, which normally sits in the last 512 bytes.
@@ -603,6 +711,17 @@ fn check_dmg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a modern Office file (docx/xlsx/pptx) by the presence of both a ZIP
+/// signature and a `[Content_Types].xml` entry name. It can't say which Office
+/// format; `ooxml_subtype` does that.
+///
+/// # Arguments
+///
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Document` on a match, otherwise `Unknown`.
 fn check_ooxml(matches: &MagicMatches) -> RealFileType {
     // .docx/.xlsx/.pptx (Office Open XML) are ZIP archives internally, so
     // a plain PK signature alone can't tell one apart from a generic
@@ -623,11 +742,16 @@ fn check_ooxml(matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
-// Only called once check_ooxml has already confirmed the file is some
-// kind of OOXML package -- picks out which one by scanning for the entry
-// name each format's package always carries at a fixed path. Falls back
-// to the generic OOXML variant if none of these match (a format this
-// doesn't know about yet, or a package that's missing that entry).
+/// Picks which Office format an OOXML package is from its main entry name.
+/// Call only after `check_ooxml` matched.
+///
+/// # Arguments
+///
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `DOCX`, `XLSX` (also used for .xlsb) or `PPTX`, or the generic `OOXML` if none is found.
 fn ooxml_subtype(matches: &MagicMatches) -> DocumentSubType {
     if matches.contains(b"word/document.xml") {
         return DocumentSubType::DOCX;
@@ -649,6 +773,18 @@ fn ooxml_subtype(matches: &MagicMatches) -> DocumentSubType {
     DocumentSubType::OOXML
 }
 
+/// Detects a ZIP archive, by either its file-header or its end-of-archive marker: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+/// The fallback also matches ZIP data buried in other files such as installers, JARs and APKs.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `RealFileType::Unknown`.
 fn check_zip(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4 {
         // Local file header.
@@ -670,6 +806,17 @@ fn check_zip(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a RAR archive (versions 1.5 to 5): checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `RealFileType::Unknown`.
 fn check_rar(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // RAR 1.5-4.x and RAR5 share this 6-byte prefix.
     let sig = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07];
@@ -689,6 +836,17 @@ fn check_rar(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a 7-Zip archive: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `RealFileType::Unknown`.
 fn check_7z(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     let sig = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
     if contents.len() >= 6
@@ -707,6 +865,17 @@ fn check_7z(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a Microsoft Cabinet (.cab) archive: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `RealFileType::Unknown`.
 fn check_cab(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Microsoft Cabinet format, used by installers/updates -- "MSCF" magic.
     if contents.len() >= 4
@@ -723,6 +892,18 @@ fn check_cab(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a POSIX tar archive by its `ustar` marker at byte 257. Old-style tar
+/// files have no marker and can't be detected.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `Unknown`. The fallback
+/// accepts `ustar` anywhere in the file, so it can match by coincidence.
 fn check_tar(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Unlike the others, tar has no signature at offset 0. The "ustar"
     // magic sits 257 bytes into the header in the POSIX variant -- old-style
@@ -745,6 +926,17 @@ fn check_tar(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects an ISO 9660 disc image by its `CD001` marker at offset 0x8001: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Archive` on a match, otherwise `RealFileType::Unknown`.
 fn check_iso(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // ISO 9660's "CD001" signature sits at byte offset 0x8001, inside the
     // Primary Volume Descriptor (logical sector 16, 2048 bytes/sector).
@@ -766,6 +958,18 @@ fn check_iso(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a PDF by its `%PDF-` header: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+/// The fallback exists because PDF readers accept junk before the header.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Document` on a match, otherwise `RealFileType::Unknown`.
 fn check_pdf(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 5
         && contents[0] == b'%'
@@ -784,6 +988,18 @@ fn check_pdf(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects an old-style Microsoft container file (.doc, .xls, .ppt, and also
+/// .msi and .msg, which share the same container).
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Document` on a match, otherwise `Unknown`. It can't tell the
+/// formats apart; `ole_cfb_subtype` does that.
 fn check_ole_cfb(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Legacy (pre-2007) Office formats (.doc/.xls/.ppt) all use this same
     // Compound File Binary container -- and so do non-Office Microsoft
@@ -811,33 +1027,26 @@ fn check_ole_cfb(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
-// Only called once check_ole_cfb has already confirmed the file is some
-// kind of Compound File Binary container -- walks the File Allocation
-// Table (FAT) to find the directory sectors, then reads each directory
-// entry's stream/storage name looking for one of the three names each
-// legacy Office format always carries (MS-DOC/XLS/PPT), the way the
-// module comment on check_ole_cfb already says this needs to work: real
-// structure, not another magic-byte scan.
-//
-// Deliberately linear rather than reconstructing the directory's
-// red-black tree the spec describes -- the tree only matters for
-// enumerating a live filesystem-like view of the container; spotting
-// whether one particular stream name exists anywhere in it doesn't need
-// that.
-//
-// Every read here is bounds-checked (`.get()`, never a bare index) and
-// every sector-chain walk is capped against cycles -- this parses
-// untrusted, potentially adversarial files, so a truncated header, an
-// out-of-range sector pointer, or a FAT chain someone deliberately
-// looped back on itself must fail closed (fall through to the generic
-// OLECFB classification) instead of panicking or hanging.
-//
-// Scoped to CFB v3 (512-byte sectors) only -- that's what legacy Office
-// documents actually use in practice. v4 (4096-byte sectors, mainly for
-// >2GB containers) places sector 0 right after a 4096-byte first block
-// rather than the fixed 512-byte header this reads; rather than get that
-// offset wrong, v4 containers just fall back to the generic OLECFB
-// classification below.
+/// Works out which old Office format a container file is by reading the names
+/// of the streams inside it (`WordDocument`, `Workbook`/`Book`, `PowerPoint Document`).
+/// Call only after `check_ole_cfb` matched.
+///
+/// The directory entries are read one after another instead of rebuilt into
+/// the tree the spec describes, since finding one stream name doesn't need it.
+///
+/// Reads untrusted data, so every read is bounds-checked and every chain walk
+/// has a limit; bad input falls back to the generic type instead of panicking
+/// or looping forever.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file. Only 512-byte-sector (version 3) files are
+///   parsed; version 4 files fall back to the generic type.
+///
+/// # Returns
+///
+/// `DOC`, `XLS` or `PPT`, or the generic `OLECFB` if no known stream is found
+/// or the file is malformed.
 fn ole_cfb_subtype(contents: &[u8]) -> DocumentSubType {
     const FREESECT: u32 = 0xFFFFFFFF;
     const ENDOFCHAIN: u32 = 0xFFFFFFFE;
@@ -999,6 +1208,17 @@ fn ole_cfb_subtype(contents: &[u8]) -> DocumentSubType {
     DocumentSubType::OLECFB
 }
 
+/// Detects a compiled HTML Help (.chm) file: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Document` on a match, otherwise `RealFileType::Unknown`.
 fn check_chm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Compiled HTML Help -- "ITSF" magic. Historically abused as a
     // malware delivery vector (CHM files can embed scripts).
@@ -1016,9 +1236,19 @@ fn check_chm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
-// Checks for a DLL assuming the MZ header starts at `base` rather than
-// necessarily at offset 0 of the whole file -- lets check_dll re-run this
-// same logic anchored at wherever a shifted MZ header turns up.
+/// Checks for a DLL whose `MZ` header starts at `base`, so `check_dll` can
+/// re-run the same test at a shifted header. Follows the pointer in
+/// the header to the PE signature, then tests the DLL flag.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `base` - Where the `MZ` header starts (0 for a normal file).
+///
+/// # Returns
+///
+/// `Some(WinExecutable)` if it's a DLL. `None` if any header is missing, the
+/// file is too short, or the DLL flag isn't set.
 fn check_dll_at(contents: &[u8], base: usize) -> Option<RealFileType> {
     if contents.len() < base + 0x40 {
         return None;
@@ -1061,6 +1291,17 @@ fn check_dll_at(contents: &[u8], base: usize) -> Option<RealFileType> {
     None
 }
 
+/// Detects a Windows DLL: a PE file with the DLL flag set. Tries the start of
+/// the file first, then every other `MZ` position found in the file.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::WinExecutable` if a DLL is found, otherwise `Unknown`.
 fn check_dll(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // A DLL is a PE file with the IMAGE_FILE_DLL characteristic flag set --
     // same container format as an EXE, just flagged as a library instead.
@@ -1085,6 +1326,18 @@ fn check_dll(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a Windows shortcut (.lnk) by its 20-byte header: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+/// Shortcuts count as executables because they launch a target.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::WinExecutable` on a match, otherwise `RealFileType::Unknown`.
 fn check_lnk(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Windows shortcut files: a fixed 20-byte header made up of a
     // HeaderSize field plus the well-known shell-link CLSID. Long and
@@ -1116,6 +1369,17 @@ fn check_lnk(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
+/// Detects a PNG image: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Image` on a match, otherwise `RealFileType::Unknown`.
 fn check_png(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     let sig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
     if contents.len() >= 8
@@ -1136,6 +1400,17 @@ fn check_png(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a JPEG image: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Image` on a match, otherwise `RealFileType::Unknown`.
 fn check_jpeg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 3 && contents[0] == 0xFF && contents[1] == 0xD8 && contents[2] == 0xFF {
         return RealFileType::Image;
@@ -1146,6 +1421,17 @@ fn check_jpeg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a GIF image, either the 87a or 89a version: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Image` on a match, otherwise `RealFileType::Unknown`.
 fn check_gif(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Covers both GIF87a and GIF89a -- they only differ in that version tag.
     if contents.len() >= 6 {
@@ -1164,6 +1450,18 @@ fn check_gif(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a BMP image by its 2-byte `BM` header: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+/// Two bytes is short, so the fallback scan can match by coincidence in any file.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Image` on a match, otherwise `RealFileType::Unknown`.
 fn check_bmp(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 2 && contents[0] == b'B' && contents[1] == b'M' {
         return RealFileType::Image;
@@ -1177,6 +1475,17 @@ fn check_bmp(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a WebP image: `RIFF` at the start and `WEBP` 8 bytes in: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Image` on a match, otherwise `RealFileType::Unknown`.
 fn check_webp(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Container is RIFF; the format tag "WEBP" sits at byte offset 8, not 0.
     if contents.len() >= 12 {
@@ -1198,6 +1507,17 @@ fn check_webp(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a TIFF image, in either byte order: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Image` on a match, otherwise `RealFileType::Unknown`.
 fn check_tiff(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // TIFF has two magic-byte variants depending on the byte order the
     // rest of the file's fields are stored in: "II" (little-endian,
@@ -1223,6 +1543,17 @@ fn check_tiff(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a WAV audio file: `RIFF` at the start and `WAVE` 8 bytes in: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Audio` on a match, otherwise `RealFileType::Unknown`.
 fn check_wav(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Container is RIFF; the format tag "WAVE" sits at byte offset 8.
     if contents.len() >= 12 {
@@ -1244,6 +1575,17 @@ fn check_wav(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a FLAC audio file: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Audio` on a match, otherwise `RealFileType::Unknown`.
 fn check_flac(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4
         && contents[0] == b'f'
@@ -1259,6 +1601,17 @@ fn check_flac(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects an Ogg audio file: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Audio` on a match, otherwise `RealFileType::Unknown`.
 fn check_ogg(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     if contents.len() >= 4
         && contents[0] == b'O'
@@ -1299,13 +1652,16 @@ const SAMPLE_RATE_MPEG1: [u32; 4] = [44100, 48000, 32000, 0];
 const SAMPLE_RATE_MPEG2: [u32; 4] = [22050, 24000, 16000, 0];
 const SAMPLE_RATE_MPEG25: [u32; 4] = [11025, 12000, 8000, 0];
 
-// Decodes a 4-byte MPEG audio frame header -- starting at a byte pair
-// that's already been confirmed to carry the 11-bit frame sync -- and
-// returns the frame's total size in bytes if every other field (version,
-// layer, bitrate, sample rate) is a legal, non-reserved combination.
-// Rejecting any reserved/invalid field is what tells an incidental
-// sync-shaped byte pair in ordinary binary data (see #34) apart from a
-// byte pair that's actually sitting in front of a real frame header.
+/// Reads a 4-byte MP3 frame header and works out how long the frame is.
+///
+/// # Arguments
+///
+/// * `bytes` - Data starting at a possible frame header. Needs at least 4 bytes.
+///
+/// # Returns
+///
+/// The frame size in bytes, or `None` if the sync bits are missing or any
+/// field (version, layer, bitrate, sample rate) is reserved or invalid.
 fn mp3_frame_size(bytes: &[u8]) -> Option<usize> {
     let header = bytes.get(0..4)?;
     if header[0] != 0xFF || (header[1] & 0xE0) != 0xE0 {
@@ -1357,11 +1713,19 @@ fn mp3_frame_size(bytes: &[u8]) -> Option<usize> {
     Some(frame_size as usize)
 }
 
-// A single frame-sync match is common by chance in ordinary binary data
-// (11 bits, see #34) -- this only trusts it once a second, independently
-// valid frame header shows up at exactly the byte offset the first
-// header's own declared size implies. Real (even VBR) MP3 streams satisfy
-// this trivially; incidental byte noise essentially never does.
+/// Checks that a valid MP3 frame header at `start` is followed by another valid
+/// one exactly where the first frame says it ends. One header alone often
+/// appears by chance in ordinary data; two in a row almost never do.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `start` - Offset of the first possible header.
+///
+/// # Returns
+///
+/// `true` if both headers are valid; `false` otherwise, including when the
+/// second frame would start past the end of the file.
 fn has_consecutive_mp3_frames(contents: &[u8], start: usize) -> bool {
     let Some(first) = contents.get(start..) else {
         return false;
@@ -1378,6 +1742,17 @@ fn has_consecutive_mp3_frames(contents: &[u8], start: usize) -> bool {
     mp3_frame_size(next).is_some()
 }
 
+/// Detects MP3 audio: an `ID3` tag, or a run of two valid frame headers that line up.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Audio` on a match, otherwise `Unknown`. Without an ID3 tag it
+/// tries every byte offset in the file, so it is slow on large files.
 fn check_mp3(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // MP3 has no single reliable signature: it's either an ID3v2 tag up
     // front, or -- lacking a tag -- a chain of frame headers whose sizes
@@ -1396,6 +1771,17 @@ fn check_mp3(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects an MP4 video by its `ftyp` marker at byte 4: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Video` on a match, otherwise `RealFileType::Unknown`.
 fn check_mp4(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // The "ftyp" box sits at byte offset 4, not 0 -- the first 4 bytes are
     // just the box's size field.
@@ -1413,6 +1799,18 @@ fn check_mp4(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects a WebM video by its EBML header: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+/// Matroska (.mkv) files share this header and are also reported as WebM.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Video` on a match, otherwise `RealFileType::Unknown`.
 fn check_webm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // WebM and Matroska (.mkv) share this same EBML container magic;
     // telling them apart needs more than the first 4 bytes.
@@ -1431,6 +1829,17 @@ fn check_webm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     return RealFileType::Unknown;
 }
 
+/// Detects an AVI video: `RIFF` at the start and `AVI ` 8 bytes in: checks the expected position first, then falls back to the
+/// shared scan so the signature is still found when it's shifted.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+/// * `matches` - Positions of every known signature, from one pass over the file.
+///
+/// # Returns
+///
+/// `RealFileType::Video` on a match, otherwise `RealFileType::Unknown`.
 fn check_avi(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     // Container is RIFF; the format tag "AVI " sits at byte offset 8.
     if contents.len() >= 12 {
@@ -1480,6 +1889,7 @@ mod tests {
                 yara_finds: Vec::new(),
                 file_type: Vec::new(),
                 file_sub_type: Vec::new(),
+                errors: Vec::new(),
             },
         }
     }
@@ -1706,7 +2116,7 @@ mod tests {
     fn check_winexe_reports_unknown_under_64_bytes() {
         let contents = [0x4D, 0x5A];
         assert_eq!(
-            check_winexe(&contents, &matches_for(&contents)).unwrap(),
+            check_winexe(&contents, &matches_for(&contents)),
             RealFileType::Unknown
         );
     }
@@ -1721,7 +2131,7 @@ mod tests {
         contents[0x3C + 2] = 0x00;
         contents[0x3C + 3] = 0x00;
         assert_eq!(
-            check_winexe(&contents, &matches_for(&contents)).unwrap(),
+            check_winexe(&contents, &matches_for(&contents)),
             RealFileType::WinExecutable
         );
     }
@@ -1732,7 +2142,7 @@ mod tests {
         contents[0] = 0x4D;
         contents[1] = 0x5A;
         assert_eq!(
-            check_winexe(&contents, &matches_for(&contents)).unwrap(),
+            check_winexe(&contents, &matches_for(&contents)),
             RealFileType::Unknown
         );
     }
@@ -1750,7 +2160,7 @@ mod tests {
         contents[102] = 0x00;
         contents[103] = 0x00;
         assert_eq!(
-            check_winexe(&contents, &matches_for(&contents)).unwrap(),
+            check_winexe(&contents, &matches_for(&contents)),
             RealFileType::WinExecutable
         );
     }

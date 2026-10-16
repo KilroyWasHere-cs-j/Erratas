@@ -24,12 +24,32 @@ use crate::{
 
 // TODO: Scan profanity patterns for word-list matches.
 
+/// Checks text for profane, offensive or sexual language using rustrict.
+///
+/// # Arguments
+///
+/// * `text` - Text extracted from a file. Empty text is never flagged.
+///
+/// # Returns
+///
+/// `true` if any of those three categories is detected.
 fn has_bad_text(text: &str) -> bool {
     text.is(Type::PROFANE | Type::OFFENSIVE | Type::SEXUAL)
 }
 
 pub fn _pii() {}
 
+/// Looks for any name on the Strike 3 list (`STRIKE3_IP`) in the text,
+/// ignoring case.
+///
+/// # Arguments
+///
+/// * `text` - Text extracted from a file.
+///
+/// # Returns
+///
+/// One entry per brand found, but each entry is the whole input text, not the
+/// brand that matched. An empty list means no brand was found.
 fn match_against_strike3_black_list(text: &str) -> Vec<String> {
     let lowercase_text = text.to_lowercase();
     let mut found = Vec::new();
@@ -41,6 +61,21 @@ fn match_against_strike3_black_list(text: &str) -> Vec<String> {
     return found;
 }
 
+/// Turns an image into pure black and white so OCR reads it more reliably.
+/// The threshold is picked per image with Otsu's method rather than fixed.
+///
+/// # Arguments
+///
+/// * `bytes` - Encoded image data (PNG, JPEG, ...). The format is guessed from
+///   the bytes, not from a file name.
+///
+/// # Returns
+///
+/// A grayscale image where every pixel is either 0 or 255.
+///
+/// # Errors
+///
+/// Returns an error if the bytes can't be recognised or decoded as an image.
 fn preprocess(bytes: &[u8]) -> Result<GrayImage, Box<dyn Error>> {
     let image = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()?
@@ -51,6 +86,20 @@ fn preprocess(bytes: &[u8]) -> Result<GrayImage, Box<dyn Error>> {
     Ok(gray_image)
 }
 
+/// Reads the text out of an image with Tesseract OCR (English only).
+///
+/// # Arguments
+///
+/// * `bytes` - Encoded image data. It is cleaned up with `preprocess` first.
+///
+/// # Returns
+///
+/// The recognised text, which can be empty or garbled for images with no text.
+///
+/// # Errors
+///
+/// Returns an error if the image can't be decoded or Tesseract fails, for
+/// example when the English language data isn't installed.
 fn extract_text_from_image(bytes: &[u8]) -> Result<String, Box<dyn Error>> {
     let gray_image = preprocess(bytes)?;
     let mut ocr = Tesseract::new(None, Some("eng"))?;
@@ -63,6 +112,21 @@ fn extract_text_from_image(bytes: &[u8]) -> Result<String, Box<dyn Error>> {
     Ok(text)
 }
 
+/// Pulls the text out of a Word (.docx) file: body paragraphs and tables.
+/// Headers, footers and text boxes are not read.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole .docx file (it's a zip archive).
+///
+/// # Returns
+///
+/// The text with a newline after each paragraph, a tab after each table cell
+/// and a newline after each table row.
+///
+/// # Errors
+///
+/// Returns an error if the bytes aren't a readable .docx.
 fn extract_text_from_docx(bytes: &[u8]) -> Result<String, docx_rs::ReaderError> {
     let docx = read_docx(bytes)?;
     let mut text = String::new();
@@ -83,7 +147,13 @@ fn extract_text_from_docx(bytes: &[u8]) -> Result<String, docx_rs::ReaderError> 
     Ok(text)
 }
 
-// Shared by top-level paragraphs and hyperlinks (both hold Vec<ParagraphChild>).
+/// Appends the text of a paragraph's pieces to `text`, following hyperlinks
+/// into their inner pieces. Other piece types (images, fields) are skipped.
+///
+/// # Arguments
+///
+/// * `children` - The pieces of one paragraph or one hyperlink.
+/// * `text` - Output buffer, appended to and never cleared.
 fn extract_paragraph_children(children: &[ParagraphChild], text: &mut String) {
     for child in children {
         match child {
@@ -102,6 +172,13 @@ fn extract_paragraph_children(children: &[ParagraphChild], text: &mut String) {
     }
 }
 
+/// Appends a table's text to `text`: a tab after each cell, a newline after
+/// each row. Tables nested inside cells are read recursively.
+///
+/// # Arguments
+///
+/// * `table` - The table to read.
+/// * `text` - Output buffer, appended to and never cleared.
 fn extract_table(table: &Table, text: &mut String) {
     for row_child in &table.rows {
         let TableChild::TableRow(row) = row_child;
@@ -125,6 +202,21 @@ fn extract_table(table: &Table, text: &mut String) {
     }
 }
 
+/// Pulls the cell values out of a spreadsheet, every sheet in order.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole workbook. The format (xlsx, xls, ...) is detected
+///   from the bytes.
+///
+/// # Returns
+///
+/// Non-empty cells each followed by a tab, with a newline after each row.
+/// Numbers and dates come out as their display text.
+///
+/// # Errors
+///
+/// Returns an error if the workbook can't be opened or a sheet can't be read.
 fn extract_text_from_excel(bytes: &[u8]) -> Result<String, calamine::Error> {
     let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes))?;
     let mut text = String::new();
@@ -148,6 +240,21 @@ fn extract_text_from_excel(bytes: &[u8]) -> Result<String, calamine::Error> {
     Ok(text)
 }
 
+/// Pulls the text out of a PowerPoint (.pptx) file, one slide at a time.
+/// Speaker notes are not read.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole .pptx file (it's a zip archive of XML slides).
+///
+/// # Returns
+///
+/// The text runs of each slide, slides in numeric order (slide2 before
+/// slide10), with a newline after each slide.
+///
+/// # Errors
+///
+/// Returns an error if the zip or a slide's XML can't be read.
 fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = ZipArchive::new(cursor)?;
@@ -192,15 +299,40 @@ fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::err
 
     Ok(text)
 }
-pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box<dyn Error>> {
+/// Extracts text from the file (OCR for images, direct reading for PDF, DOCX,
+/// XLSX and PPTX) and checks it for bad language and Strike 3 brand names.
+///
+/// Must run after `identify_real_filetype`: it picks the extractor from
+/// `file_type` / `file_sub_type`, so with those empty it does nothing.
+///
+/// # Arguments
+///
+/// * `erratas_job` - The job to read from and update in place. Sets
+///   `bad_language` and `strike3`. An extraction failure is added to `errors`
+///   and leaves the earlier values alone.
+///
+/// # Returns
+///
+/// The same job, so calls can be chained.
+pub fn scan_content(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     if erratas_job
         .file_info
         .file_type
         .contains(&RealFileType::Image)
     {
-        let text = extract_text_from_image(&erratas_job.file_info.contents)?;
-        erratas_job.file_info.bad_language = has_bad_text(&text);
-        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        let text = extract_text_from_image(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("OCR extract fail: {e}"))
+            })
+            .ok();
+
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        }
     }
 
     if erratas_job
@@ -208,9 +340,18 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
         .file_sub_type
         .contains(&crate::types::RealFileSubType::Document(PDF))
     {
-        let text = pdf_extract::extract_text_from_mem(&erratas_job.file_info.contents)?;
-        erratas_job.file_info.bad_language = has_bad_text(&text);
-        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        let text = pdf_extract::extract_text_from_mem(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("PDF extract fail: {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        }
     }
 
     if erratas_job
@@ -220,9 +361,18 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
             crate::types::DocumentSubType::DOCX,
         ))
     {
-        let text = extract_text_from_docx(&erratas_job.file_info.contents)?;
-        erratas_job.file_info.bad_language = has_bad_text(&text);
-        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        let text = extract_text_from_docx(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Docx extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        }
     }
 
     if erratas_job
@@ -232,9 +382,18 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
             crate::types::DocumentSubType::XLSX,
         ))
     {
-        let text = extract_text_from_excel(&erratas_job.file_info.contents)?;
-        erratas_job.file_info.bad_language = has_bad_text(&text);
-        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        let text = extract_text_from_excel(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Excel extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        }
     }
     if erratas_job
         .file_info
@@ -243,11 +402,20 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> Result<&mut ErratasJob, Box
             crate::types::DocumentSubType::PPTX,
         ))
     {
-        let text = extract_text_from_powerpoint(&erratas_job.file_info.contents)?;
-        erratas_job.file_info.bad_language = has_bad_text(&text);
-        erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        let text = extract_text_from_powerpoint(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Powerpoint extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        }
     }
-    Ok(erratas_job)
+    erratas_job
 }
 
 #[cfg(test)]
@@ -506,9 +674,10 @@ mod tests {
                 yara_finds: Vec::new(),
                 file_type: Vec::new(),
                 file_sub_type: Vec::new(),
+                errors: Vec::new(),
             },
         };
-        scan_content(&mut job).ok()?;
+        scan_content(&mut job);
         Some(())
     }
 

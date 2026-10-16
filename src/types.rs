@@ -3,6 +3,7 @@ use std::ops::Range;
 
 use serde::Serialize;
 
+/// All data given and discovered about a file
 #[derive(Debug, Serialize)]
 pub struct FileInfo {
     pub contents: Vec<u8>,
@@ -14,19 +15,24 @@ pub struct FileInfo {
     pub yara_finds: Vec<RuleHit>,
     pub file_type: Vec<RealFileType>,
     pub file_sub_type: Vec<RealFileSubType>,
+    // Non-critical problems hit during a scan (the scan still finished).
+    // Serialized with the rest of FileInfo so API users see them too.
+    pub errors: Vec<String>,
 }
 
+/// Represents a file as it moves through Erratas
 #[derive(Debug, Serialize)]
 pub struct ErratasJob {
     pub file_info: FileInfo,
-    //pub yara_results: Vec<String>,
 }
 
+/// A handy helper for representing file subtype when a proper file subtype cannot be derived
 #[derive(Debug, PartialEq, Serialize)]
 pub enum UnknownSubType {
     Unknown,
 }
 
+/// All Erratas recognized file supertypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum RealFileType {
     Image,
@@ -40,6 +46,7 @@ pub enum RealFileType {
     Unknown,
 }
 
+/// All Erratas recognized file subtypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum ImageSubType {
     PNG,
@@ -50,6 +57,7 @@ pub enum ImageSubType {
     TIFF,
 }
 
+/// All Erratas recognized video file subtypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum VideoSubType {
     MP4,
@@ -57,6 +65,7 @@ pub enum VideoSubType {
     AVI,
 }
 
+/// All Erratas recognized audio file subtypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum AudioSubType {
     WAV,
@@ -65,6 +74,7 @@ pub enum AudioSubType {
     MP3,
 }
 
+/// All Erratas recognized document file subtypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum DocumentSubType {
     DOC,
@@ -79,6 +89,7 @@ pub enum DocumentSubType {
     CHM,
 }
 
+/// All Erratas recognized archive file subtypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum ArchiveSubType {
     ZIP,
@@ -90,6 +101,7 @@ pub enum ArchiveSubType {
     ISO,
 }
 
+/// All Erratas recognized executable file subtypes
 #[derive(Debug, PartialEq, Serialize)]
 pub enum ExecutableSubType {
     ELF,
@@ -100,6 +112,7 @@ pub enum ExecutableSubType {
     LNK,
 }
 
+/// Handy enum wrapping around file subtypes to make them easier to interact with
 #[derive(Debug, PartialEq, Serialize)]
 pub enum RealFileSubType {
     Unknown(UnknownSubType),
@@ -111,8 +124,7 @@ pub enum RealFileSubType {
     Executable(ExecutableSubType),
 }
 
-// Owned result types: no borrows from Scanner/Rules, so these can be
-// returned, stored, or serialized after the scan is gone.
+/// Higher order wrapper around the yara scan returns
 #[derive(Debug, Serialize)]
 pub struct RuleHit {
     pub rule: String,
@@ -143,6 +155,17 @@ pub enum Severity {
 }
 
 impl Severity {
+    /// Reads a severity label from a YARA rule's metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The label, matched without regard to case. Spaces around it are
+    ///   not trimmed, so `" high"` doesn't match.
+    ///
+    /// # Returns
+    ///
+    /// The matching level, or `Unknown` for anything unrecognised, so a typo
+    /// in a rule shows up as `Unknown` instead of passing as a real level.
     pub fn parse(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "low" => Self::Low,
@@ -177,7 +200,7 @@ impl fmt::Display for FileInfo {
             "{} ({}), {} bytes, PII: {}, malware: {}, hash matches: {}, YARA finds: {}, bad language: {}, strike3: {}\n yara rule hits: {:?}",
             file_types,
             file_sub_types,
-            self.contents.len(),
+            0,
             self.pii,
             self.malware,
             self.hashmatches.len(),
@@ -185,7 +208,13 @@ impl fmt::Display for FileInfo {
             self.bad_language,
             self.strike3.join(", "),
             self.yara_finds
-        )
+        )?;
+
+        // Only shown when something went wrong, so clean scans print as before.
+        if !self.errors.is_empty() {
+            write!(f, "\n errors: {}", self.errors.join("; "))?;
+        }
+        Ok(())
     }
 }
 

@@ -1,25 +1,69 @@
 use std::error::Error;
+use std::fs;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use crate::scan;
 
-// Reject anything bigger than this before reading a single byte of it.
-const MAX_UPLOAD: u64 = 100 * 1024 * 1024; // 100 MB
+const MAX_UPLOAD: u64 = 1024 * 1024 * 1024; // 1 GB
 
-// Gives each upload its own file name.
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
-fn handle_client(mut stream: TcpStream) -> io::Result<()> {
-    // Drop clients that stall, so they can't tie up a thread forever.
+// Owns a path and deletes the file at that path when it goes out of scope.
+struct FileGuard {
+    path: PathBuf,
+}
+
+impl FileGuard {
+    /// Takes ownership of cleanup for the file at `path`.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - File to delete on drop. It doesn't have to exist yet, and a
+    ///   missing file at drop time is not an error.
+    fn new(path: impl Into<PathBuf>) -> Self {
+        FileGuard { path: path.into() }
+    }
+}
+
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        // Drop can't return an error, so ignore it or log it.
+        // The file may already be gone, which is fine.
+        if let Err(e) = fs::remove_file(&self.path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("could not delete {}: {e}", self.path.display());
+            }
+        }
+    }
+}
+
+/// Serves one client: reads an upload, saves it to disk, scans it, and writes
+/// the result back.
+///
+/// Wire format: the client sends an 8-byte big-endian length, then that many
+/// bytes of file data. The server replies with `OK <n> bytes saved to <path>`,
+/// then the scan result as one line of JSON. A length over `MAX_UPLOAD` gets
+/// `ERR too large` and nothing is saved.
+///
+/// # Arguments
+///
+/// * `stream` - The client connection, owned so it closes when this returns.
+///   Reads time out after 30 seconds so a stalled client can't hold a thread forever.
+///
+/// # Errors
+///
+/// Returns an error if the connection drops or times out, the upload is
+/// shorter than the length it announced, or the scan or the reply fails. The
+/// saved upload is deleted on every exit path.
+fn handle_client(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
-    // Framing: the client sends the file size first, as 8 big-endian bytes.
-    // TCP is one continuous byte stream, so this is how we know where the file ends.
     let mut len_buf = [0u8; 8];
     stream.read_exact(&mut len_buf)?;
     let len = u64::from_be_bytes(len_buf);
@@ -33,35 +77,44 @@ fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     let path = format!("upload-{id}.bin");
     let mut file = BufWriter::new(File::create(&path)?);
 
-    // Stream exactly `len` bytes from the socket into the file, in small chunks.
-    // The whole file is never held in memory.
-    // `(&mut stream).take(..)` borrows the stream so we can still reply afterwards.
+    // Built right after the file exists so every exit below deletes it.
+    // Borrows `path` (instead of moving it) so the name is still usable below.
+    let _guard = FileGuard::new(&path);
+
     let copied = io::copy(&mut (&mut stream).take(len), &mut file)?;
     file.flush()?;
 
-    // Fewer bytes than promised means the client hung up partway through.
     if copied != len {
-        std::fs::remove_file(&path)?;
-        return Err(io::Error::new(
+        return Err(Box::new(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "upload cut short",
-        ));
+        )));
     }
 
-    // Tell the client it arrived. A real server could run a scan here and send the result.
     writeln!(stream, "OK {copied} bytes saved to {path}")?;
 
-    let job = scan(&path);
+    let job = scan(&path)?;
 
-    // Serialize directly into the stream, with no String in the middle.
-    // serde_json::Error converts into io::Error, so `?` works here too.
     serde_json::to_writer(&mut stream, &job)?;
-
-    // to_writer doesn't add a line break; add one so the client can read line by line
     stream.write_all(b"\n")?;
     Ok(())
 }
 
+/// Listens for connections and handles each client on its own thread.
+///
+/// There is no authentication and no limit on simultaneous clients, so bind to
+/// a trusted interface only.
+///
+/// # Arguments
+///
+/// * `ip` - Address to bind.
+/// * `port` - Port to listen on.
+///
+/// # Errors
+///
+/// Returns an error only if binding fails. Once listening, a failed accept or a
+/// failed client is logged and the loop continues, so this never returns `Ok`
+/// in practice.
 pub fn serve(ip: &str, port: u16) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind((ip, port))?;
     println!("Listening on {}", listener.local_addr()?);
@@ -104,10 +157,31 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept()?;
-            handle_client(stream)
+
+            // `Box<dyn Error>` can't cross the thread boundary (it isn't
+            // `Send`), so turn it back into an io::Error here. An io::Error
+            // inside the box is unwrapped as-is so tests can still check `kind()`.
+            handle_client(stream).map_err(|e| match e.downcast::<io::Error>() {
+                Ok(io_err) => *io_err,
+                Err(other) => io::Error::other(other.to_string()),
+            })
         });
 
         (addr, handle)
+    }
+
+    // Pulls the scanned file's bytes back out of the JSON result line. The
+    // server deletes the upload after scanning, so this is how a test
+    // confirms the right bytes were received.
+    fn scanned_bytes(reply: &str) -> Vec<u8> {
+        let json_line = reply.lines().nth(1).expect("no scan result line");
+        let value: serde_json::Value = serde_json::from_str(json_line).unwrap();
+        value["file_info"]["contents"]
+            .as_array()
+            .expect("contents isn't an array")
+            .iter()
+            .map(|b| b.as_u64().unwrap() as u8)
+            .collect()
     }
 
     fn connect(addr: SocketAddr) -> TcpStream {
@@ -131,8 +205,8 @@ mod tests {
     }
 
     // Pulls "upload-N.bin" out of the "OK ... saved to <path>" line so the
-    // test can check the file and clean it up afterwards (the server
-    // writes into the working directory and never deletes on success).
+    // test can check the file was deleted after the scan (the server
+    // writes into the working directory).
     fn saved_path(reply: &str) -> String {
         let first = reply.lines().next().expect("empty reply");
         first
@@ -179,10 +253,12 @@ mod tests {
             "unexpected reply: {reply}"
         );
 
-        // Bytes on disk must match exactly what was sent.
-        let on_disk = std::fs::read(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(on_disk, body);
+        // The server scanned exactly what was sent, then deleted the upload.
+        assert_eq!(scanned_bytes(&reply), body);
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "upload was not deleted"
+        );
     }
 
     #[test]
@@ -191,7 +267,6 @@ mod tests {
 
         let reply = upload(addr, b"plain text, nothing to see here");
         handle.join().unwrap().unwrap();
-        std::fs::remove_file(saved_path(&reply)).unwrap();
 
         // Line 2 is the scan result a client would parse.
         let json_line = reply.lines().nth(1).expect("no scan result line");
@@ -215,8 +290,11 @@ mod tests {
             reply.starts_with("OK 0 bytes saved to "),
             "unexpected reply: {reply}"
         );
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-        std::fs::remove_file(&path).unwrap();
+        assert!(scanned_bytes(&reply).is_empty());
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "upload was not deleted"
+        );
     }
 
     #[test]
@@ -318,13 +396,14 @@ mod tests {
                 "unexpected reply: {reply}"
             );
 
+            // Each client's scan saw its own bytes, and the file is gone after.
             let path = saved_path(&reply);
-            assert_eq!(&std::fs::read(&path).unwrap(), body);
+            assert_eq!(&scanned_bytes(&reply), body);
+            assert!(
+                !std::path::Path::new(&path).exists(),
+                "upload was not deleted"
+            );
             paths.push(path);
-        }
-
-        for path in &paths {
-            std::fs::remove_file(path).unwrap();
         }
 
         // Unique ids -> no two uploads overwrote each other.
