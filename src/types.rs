@@ -6,6 +6,7 @@ use serde::Serialize;
 /// All data given and discovered about a file
 #[derive(Debug, Serialize)]
 pub struct FileInfo {
+    #[serde(skip)]
     pub contents: Vec<u8>,
     pub bad_language: bool,
     pub pii: bool,

@@ -39,7 +39,7 @@ fn has_bad_text(text: &str) -> bool {
 
 pub fn _pii() {}
 
-/// Looks for any name on the Strike 3 list (`STRIKE3_IP`) in the text,
+/// Looks for any name on the Strike 3 brand list (`STRIKE3_IP`) in the text,
 /// ignoring case.
 ///
 /// # Arguments
@@ -147,6 +147,7 @@ fn extract_text_from_docx(bytes: &[u8]) -> Result<String, docx_rs::ReaderError> 
     Ok(text)
 }
 
+// Shared by top-level paragraphs and hyperlinks (both hold Vec<ParagraphChild>).
 /// Appends the text of a paragraph's pieces to `text`, following hyperlinks
 /// into their inner pieces. Other piece types (images, fields) are skipped.
 ///

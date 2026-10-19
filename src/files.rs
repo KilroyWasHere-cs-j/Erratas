@@ -383,6 +383,9 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
     return erratas_job;
 }
 
+// Returns the byte offset where the ELF magic was found, so callers (like
+// is_elf_shared_object) can read the rest of the header relative to where
+// it actually starts -- not always 0, once a fallback match is involved.
 /// Detects a Linux (ELF) executable by its 4-byte magic.
 ///
 /// # Arguments
@@ -523,6 +526,9 @@ impl MagicMatches {
         MagicMatches::scan_with(&MAGIC_AC, MAGIC_PATTERNS, contents)
     }
 
+    // Generalized over an arbitrary automaton/pattern-list pair so the
+    // underlying multi-pattern-match mechanism can be unit-tested in
+    // isolation from the real, fixed MAGIC_PATTERNS set.
     /// Same as `scan`, but with the automaton and pattern list passed in, so the
     /// matching can be unit-tested without the real `MAGIC_PATTERNS`.
     ///
@@ -547,6 +553,8 @@ impl MagicMatches {
         MagicMatches { by_pattern }
     }
 
+    // Every position `pattern` was found at, in ascending order. Empty if
+    // `pattern` was never in the automaton's pattern list or never matched.
     /// Looks up where a pattern was found.
     ///
     /// # Arguments
@@ -564,6 +572,7 @@ impl MagicMatches {
             .unwrap_or(&[])
     }
 
+    // Direct replacement for the old scan_for(contents, pattern).
     /// Checks whether a pattern appears anywhere in the file.
     ///
     /// # Arguments
@@ -580,6 +589,9 @@ impl MagicMatches {
         !self.positions(pattern).is_empty()
     }
 
+    // Direct replacement for the old scan_for_at_offset(contents, anchor,
+    // gap, tag): is `tag` present at exactly `gap` bytes after some
+    // occurrence of `anchor`?
     /// Checks that `tag` appears exactly `gap` bytes after an occurrence of
     /// `anchor`, for formats like WebP where the tag sits inside a RIFF wrapper.
     ///
@@ -742,6 +754,11 @@ fn check_ooxml(matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
+// Only called once check_ooxml has already confirmed the file is some
+// kind of OOXML package -- picks out which one by scanning for the entry
+// name each format's package always carries at a fixed path. Falls back
+// to the generic OOXML variant if none of these match (a format this
+// doesn't know about yet, or a package that's missing that entry).
 /// Picks which Office format an OOXML package is from its main entry name.
 /// Call only after `check_ooxml` matched.
 ///
@@ -1027,6 +1044,33 @@ fn check_ole_cfb(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
+// Only called once check_ole_cfb has already confirmed the file is some
+// kind of Compound File Binary container -- walks the File Allocation
+// Table (FAT) to find the directory sectors, then reads each directory
+// entry's stream/storage name looking for one of the three names each
+// legacy Office format always carries (MS-DOC/XLS/PPT), the way the
+// module comment on check_ole_cfb already says this needs to work: real
+// structure, not another magic-byte scan.
+//
+// Deliberately linear rather than reconstructing the directory's
+// red-black tree the spec describes -- the tree only matters for
+// enumerating a live filesystem-like view of the container; spotting
+// whether one particular stream name exists anywhere in it doesn't need
+// that.
+//
+// Every read here is bounds-checked (`.get()`, never a bare index) and
+// every sector-chain walk is capped against cycles -- this parses
+// untrusted, potentially adversarial files, so a truncated header, an
+// out-of-range sector pointer, or a FAT chain someone deliberately
+// looped back on itself must fail closed (fall through to the generic
+// OLECFB classification) instead of panicking or hanging.
+//
+// Scoped to CFB v3 (512-byte sectors) only -- that's what legacy Office
+// documents actually use in practice. v4 (4096-byte sectors, mainly for
+// >2GB containers) places sector 0 right after a 4096-byte first block
+// rather than the fixed 512-byte header this reads; rather than get that
+// offset wrong, v4 containers just fall back to the generic OLECFB
+// classification below.
 /// Works out which old Office format a container file is by reading the names
 /// of the streams inside it (`WordDocument`, `Workbook`/`Book`, `PowerPoint Document`).
 /// Call only after `check_ole_cfb` matched.
@@ -1236,6 +1280,9 @@ fn check_chm(contents: &[u8], matches: &MagicMatches) -> RealFileType {
     RealFileType::Unknown
 }
 
+// Checks for a DLL assuming the MZ header starts at `base` rather than
+// necessarily at offset 0 of the whole file -- lets check_dll re-run this
+// same logic anchored at wherever a shifted MZ header turns up.
 /// Checks for a DLL whose `MZ` header starts at `base`, so `check_dll` can
 /// re-run the same test at a shifted header. Follows the pointer in
 /// the header to the PE signature, then tests the DLL flag.
@@ -1652,6 +1699,13 @@ const SAMPLE_RATE_MPEG1: [u32; 4] = [44100, 48000, 32000, 0];
 const SAMPLE_RATE_MPEG2: [u32; 4] = [22050, 24000, 16000, 0];
 const SAMPLE_RATE_MPEG25: [u32; 4] = [11025, 12000, 8000, 0];
 
+// Decodes a 4-byte MPEG audio frame header -- starting at a byte pair
+// that's already been confirmed to carry the 11-bit frame sync -- and
+// returns the frame's total size in bytes if every other field (version,
+// layer, bitrate, sample rate) is a legal, non-reserved combination.
+// Rejecting any reserved/invalid field is what tells an incidental
+// sync-shaped byte pair in ordinary binary data (see #34) apart from a
+// byte pair that's actually sitting in front of a real frame header.
 /// Reads a 4-byte MP3 frame header and works out how long the frame is.
 ///
 /// # Arguments
@@ -1713,6 +1767,11 @@ fn mp3_frame_size(bytes: &[u8]) -> Option<usize> {
     Some(frame_size as usize)
 }
 
+// A single frame-sync match is common by chance in ordinary binary data
+// (11 bits, see #34) -- this only trusts it once a second, independently
+// valid frame header shows up at exactly the byte offset the first
+// header's own declared size implies. Real (even VBR) MP3 streams satisfy
+// this trivially; incidental byte noise essentially never does.
 /// Checks that a valid MP3 frame header at `start` is followed by another valid
 /// one exactly where the first frame says it ends. One header alone often
 /// appears by chance in ordinary data; two in a row almost never do.

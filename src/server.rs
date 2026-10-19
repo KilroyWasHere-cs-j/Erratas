@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use crate::scan;
+use crate::scan_path;
 
 const MAX_UPLOAD: u64 = 1024 * 1024 * 1024; // 1 GB
 
@@ -93,7 +93,8 @@ fn handle_client(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
 
     writeln!(stream, "OK {copied} bytes saved to {path}")?;
 
-    let job = scan(&path)?;
+    // TODO update to use scan bytes
+    let job = scan_path(&path)?;
 
     serde_json::to_writer(&mut stream, &job)?;
     stream.write_all(b"\n")?;
@@ -170,17 +171,19 @@ mod tests {
         (addr, handle)
     }
 
-    // Pulls the scanned file's bytes back out of the JSON result line. The
-    // server deletes the upload after scanning, so this is how a test
-    // confirms the right bytes were received.
-    fn scanned_bytes(reply: &str) -> Vec<u8> {
+    // Names of the YARA rules the scan matched, read from the JSON result
+    // line. The raw bytes aren't in the reply (`contents` is #[serde(skip)]),
+    // so tests tell uploads apart by what the scan finds in them. The server
+    // deletes the upload after scanning, so this is how a test confirms the
+    // right bytes were received.
+    fn matched_rules(reply: &str) -> Vec<String> {
         let json_line = reply.lines().nth(1).expect("no scan result line");
         let value: serde_json::Value = serde_json::from_str(json_line).unwrap();
-        value["file_info"]["contents"]
+        value["file_info"]["yara_finds"]
             .as_array()
-            .expect("contents isn't an array")
+            .expect("yara_finds isn't an array")
             .iter()
-            .map(|b| b.as_u64().unwrap() as u8)
+            .map(|hit| hit["rule"].as_str().unwrap().to_string())
             .collect()
     }
 
@@ -241,7 +244,9 @@ mod tests {
 
     #[test]
     fn upload_is_saved_and_acknowledged() {
-        let body = b"hello from the erratas server tests";
+        // 40 NOPs trip the shellcode_nop_sled rule, so the scan result proves
+        // these exact bytes were scanned.
+        let body = &[0x90u8; 40];
         let (addr, handle) = one_shot_server();
 
         let reply = upload(addr, body);
@@ -254,7 +259,7 @@ mod tests {
         );
 
         // The server scanned exactly what was sent, then deleted the upload.
-        assert_eq!(scanned_bytes(&reply), body);
+        assert!(matched_rules(&reply).contains(&"shellcode_nop_sled".to_string()));
         assert!(
             !std::path::Path::new(&path).exists(),
             "upload was not deleted"
@@ -290,7 +295,7 @@ mod tests {
             reply.starts_with("OK 0 bytes saved to "),
             "unexpected reply: {reply}"
         );
-        assert!(scanned_bytes(&reply).is_empty());
+        assert!(matched_rules(&reply).is_empty());
         assert!(
             !std::path::Path::new(&path).exists(),
             "upload was not deleted"
@@ -376,7 +381,14 @@ mod tests {
 
         // Open every connection before any of them finishes, so the
         // uploads overlap and exercise the one-thread-per-client path.
-        let bodies: Vec<Vec<u8>> = (0..4).map(|i| vec![b'a' + i as u8; 64 * (i + 1)]).collect();
+        // Even clients send a NOP sled (matches a YARA rule), odd ones send
+        // plain bytes (matches nothing), so crossed-over results would show.
+        let bodies: Vec<Vec<u8>> = (0..4)
+            .map(|i| {
+                let fill = if i % 2 == 0 { 0x90 } else { b'a' + i as u8 };
+                vec![fill; 64 * (i + 1)]
+            })
+            .collect();
         let mut streams: Vec<TcpStream> = bodies.iter().map(|_| connect_with_retry(port)).collect();
 
         for (stream, body) in streams.iter_mut().zip(&bodies) {
@@ -398,7 +410,12 @@ mod tests {
 
             // Each client's scan saw its own bytes, and the file is gone after.
             let path = saved_path(&reply);
-            assert_eq!(&scanned_bytes(&reply), body);
+            let has_sled = matched_rules(&reply).contains(&"shellcode_nop_sled".to_string());
+            assert_eq!(
+                has_sled,
+                body[0] == 0x90,
+                "scan result doesn't match this client's bytes"
+            );
             assert!(
                 !std::path::Path::new(&path).exists(),
                 "upload was not deleted"

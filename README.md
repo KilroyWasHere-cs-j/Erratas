@@ -78,6 +78,14 @@ the lib via the package's own name) — no workspace split needed yet.
 cargo run -- <file>
 ```
 
+## Tests
+
+`cargo test` runs the unit tests. `scripts/run_all_tests.py` runs everything in one go (the Rust tests, format detection, the YARA fixtures, the strike3 word list and server mode); run it from this folder:
+
+```bash
+python3 scripts/run_all_tests.py
+```
+
 ## TODO
 
 **Core checks** (each is a `todo!()` right now):
