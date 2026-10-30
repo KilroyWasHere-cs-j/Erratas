@@ -192,4 +192,3 @@ the lib via the package's own name) — no workspace split needed yet.
 - [ ] Sanitize the file path in `load_file`
 - [ ] Authentication and a client cap for server mode
 - [ ] Server mode still saves each upload to disk; switch it to `scan_bytes`
-- [ ] Decide where this plugs into Dewey: the synchronous upload path (blocks the request) or the async post-upload pipeline (`idAndSort`)
