@@ -2887,4 +2887,110 @@ mod tests {
             RealFileType::Archive
         );
     }
+
+    // --- check_csv ----------------------------------------------------
+
+    #[test]
+    fn check_csv_accepts_a_simple_csv() {
+        assert!(check_csv(b"name,age\nbob,30\nann,25\n"));
+    }
+
+    #[test]
+    fn check_csv_accepts_quoted_commas_and_crlf() {
+        assert!(check_csv(b"name,note\r\nbob,\"a, b\"\r\nann,\"x\"\"y\"\r\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_uneven_columns() {
+        assert!(!check_csv(b"a,b,c\n1,2\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_prose_and_single_column() {
+        assert!(!check_csv(b"hello, world, this is one line"));
+        assert!(!check_csv(b"one\ntwo\nthree\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_binary_and_empty() {
+        assert!(!check_csv(b"MZ\x90\x00\x03,\x00\x00\nx,y\n"));
+        assert!(!check_csv(&[0xff, 0xfe, 0x00, 0x01]));
+        assert!(!check_csv(b""));
+    }
+
+    // --- check_csv edge cases ----------------------------------------
+
+    #[test]
+    fn check_csv_ignores_a_leading_bom_and_missing_trailing_newline() {
+        assert!(check_csv(b"\xEF\xBB\xBFa,b\n1,2"));
+    }
+
+    #[test]
+    fn check_csv_skips_blank_lines() {
+        assert!(check_csv(b"a,b\n\n1,2\n\n3,4\n"));
+    }
+
+    #[test]
+    fn check_csv_accepts_a_newline_inside_a_quoted_field() {
+        assert!(check_csv(b"a,b\n\"line1\nline2\",2\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_an_unclosed_quote() {
+        assert!(!check_csv(b"a,b\n\"1,2\n3,4\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_a_single_row() {
+        assert!(!check_csv(b"a,b,c\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_control_bytes_in_otherwise_valid_rows() {
+        assert!(!check_csv(b"a,b\n1,\x002\n"));
+    }
+
+    // --- issue #48: text/CSV must be typed, not left as Unknown -------
+    // These go through identify_real_filetype (the real entry point),
+    // not check_csv directly. Detection isn't wired in yet, so the
+    // "is typed" tests are expected to FAIL until #48 is implemented.
+
+    #[test]
+    fn issue_48_plain_text_is_not_typed_unknown() {
+        let mut result = result_for(b"Just a plain sentence of text.\nAnd a second line.\n".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(
+            !result.file_info.file_type.contains(&RealFileType::Unknown),
+            "plain text should get a real type, got {:?}",
+            result.file_info.file_type
+        );
+    }
+
+    #[test]
+    fn issue_48_csv_is_not_typed_unknown() {
+        let mut result = result_for(b"name,age\nbob,30\nann,25\n".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(
+            !result.file_info.file_type.contains(&RealFileType::Unknown),
+            "a CSV should get a real type, got {:?}",
+            result.file_info.file_type
+        );
+    }
+
+    #[test]
+    fn issue_48_binary_blob_is_not_typed_as_text() {
+        // NUL bytes + invalid UTF-8: must not be mistaken for text. Today
+        // this is Unknown; once a Text type exists it must stay out of it.
+        let mut result = result_for(vec![0x00, 0x01, 0x02, 0xFF, 0xFE, 0x00, 0x00, 0x80]);
+        identify_real_filetype(&mut result);
+        assert_eq!(result.file_info.file_type, vec![RealFileType::Unknown]);
+    }
+
+    #[test]
+    fn issue_48_text_with_a_pdf_header_stays_a_document() {
+        // The text check must not steal files a magic-byte check already claims.
+        let mut result = result_for(b"%PDF-1.4\nthis is all valid text\n".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(result.file_info.file_type.contains(&RealFileType::Document));
+    }
 }

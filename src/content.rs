@@ -720,4 +720,56 @@ mod tests {
             "scan_content should run OCR + the profanity check on a real image without erroring"
         );
     }
+
+    // --- issue #48: text/CSV content scanning ---------------------------
+    // Standard: text is typed and checked for bad language, but NOT for
+    // Strike 3 names. Goes through identify_real_filetype + scan_content,
+    // the same order lib.rs runs them. The bad-language test is expected
+    // to FAIL until #48 is implemented.
+
+    fn scan_text_bytes(bytes: &[u8]) -> ErratasJob {
+        let mut job = ErratasJob {
+            file_info: crate::types::FileInfo {
+                contents: bytes.to_vec(),
+                bad_language: false,
+                pii: false,
+                malware: false,
+                strike3: Vec::new(),
+                hashmatches: Vec::new(),
+                yara_finds: Vec::new(),
+                file_type: Vec::new(),
+                file_sub_type: Vec::new(),
+                errors: Vec::new(),
+            },
+        };
+        crate::files::identify_real_filetype(&mut job);
+        scan_content(&mut job);
+        job
+    }
+
+    #[test]
+    fn issue_48_profane_text_file_is_flagged_for_bad_language() {
+        let job = scan_text_bytes(b"this is a shit example of profane text\nsecond line\n");
+        assert!(
+            job.file_info.bad_language,
+            "profanity in a text file should set bad_language"
+        );
+    }
+
+    #[test]
+    fn issue_48_clean_text_file_is_not_flagged_and_has_no_errors() {
+        let job = scan_text_bytes(b"a perfectly polite sentence\nand another one\n");
+        assert!(!job.file_info.bad_language);
+        assert!(job.file_info.errors.is_empty());
+    }
+
+    #[test]
+    fn issue_48_text_file_is_not_scanned_for_strike3() {
+        let job = scan_text_bytes(b"visit vixen.com and tushy.com\nmore text here\n");
+        assert!(
+            job.file_info.strike3.is_empty(),
+            "text files are exempt from the strike3 scan, got {:?}",
+            job.file_info.strike3
+        );
+    }
 }
