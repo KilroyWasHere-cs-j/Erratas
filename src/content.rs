@@ -439,7 +439,6 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
             .ok();
         if let Some(text) = text {
             erratas_job.file_info.bad_language = has_bad_text(&text);
-            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
         }
     }
 
