@@ -41,6 +41,17 @@ strike3/ as one combined suite:
                                  overlapping uploads all succeed, and that
                                  no upload-*.bin files are left behind.
 
+  5. Text files               -- plain text and CSV have no magic bytes, so
+                                 they can't go through the NUL-padded
+                                 FORMAT_FIXTURES table (NUL bytes would make
+                                 them look binary). Writes real text/CSV
+                                 fixtures and checks they are typed (not
+                                 Unknown), that profanity sets bad language,
+                                 that Strike 3 names in text are NOT flagged,
+                                 and that binary and magic-byte files are not
+                                 mistaken for text. Server mode uploads the
+                                 same fixtures too.
+
 Each phase reports its own pass/fail tally; the script's exit code is
 nonzero if anything, anywhere, failed.
 
@@ -620,6 +631,26 @@ def phase_server(bin_path: Path) -> bool:
             detected = [t for t in file_types if t != "Unknown"]
             tally.record(bool(detected), f"upload {path.name}", f"file_type={file_types}")
 
+        # --- text and CSV fixtures, over the wire ---
+        # Same fixtures as Phase 5; checks the JSON type and bad_language.
+        for name, (data, subtype, want_bad, want_type) in TEXT_FIXTURES.items():
+            if not data:
+                continue  # an empty upload has no body to send
+            try:
+                saved, result, problem = parse_upload_reply(server_upload(port, data), len(data))
+            except OSError as e:
+                tally.record(False, f"upload {name}", f"socket error: {e}")
+                continue
+            remove_upload(saved)
+            if problem:
+                tally.record(False, f"upload {name}", problem)
+                continue
+            info = result.get("file_info", {})
+            types = [t.lower() for t in info.get("file_type", [])]
+            bad_ok = want_bad is None or info.get("bad_language") == want_bad
+            ok = (want_type in types) and bad_ok and not info.get("strike3")
+            tally.record(ok, f"upload {name}", f"file_type={types} bad_language={info.get('bad_language')}")
+
         # --- content scan runs server-side too ---
         # One strike3 image is enough to prove OCR + blocklist fire
         # through the server path; Phase 3 covers the full list.
@@ -713,6 +744,61 @@ def phase_server(bin_path: Path) -> bool:
 # --- main ------------------------------------------------------------------
 
 
+# --- Phase 5: text and CSV files ------------------------------------------
+
+# name -> (bytes, expected subtype text or None, expected bad language
+# (None = don't care), expected type). Written as-is, never padded.
+TEXT_FIXTURES: dict[str, tuple[bytes, str | None, bool | None, str]] = {
+    "plain.txt": (b"A perfectly polite sentence.\nAnd a second line.\n", "TXT", False, "document"),
+    "data.csv": (b"name,age\nbob,30\nann,25\n", "CSV", False, "document"),
+    "quoted.csv": (b'name,note\r\nbob,"a, b"\r\nann,"x""y"\r\n', "CSV", False, "document"),
+    "profane.txt": (b"this is a shit example of profane text\nsecond line\n", "TXT", True, "document"),
+    # Text is exempt from the Strike 3 scan, so this must stay unflagged.
+    # (The names also trip the profanity filter, so bad language is not asserted.)
+    "strike3_names.txt": (b"visit vixen.com and tushy.com\nmore text here\n", "TXT", None, "document"),
+    # A file a magic-byte check already claims must keep that type.
+    "pdf_header.txt": (b"%PDF-1.4\nthis is all valid text\n", "PDF", False, "document"),
+    # NUL bytes + invalid UTF-8: must never be called text.
+    "binary.dat": (b"\x00\x01\x02\xff\xfe\x00\x00\x80", None, False, "unknown"),
+    "empty.txt": (b"", None, False, "unknown"),
+}
+
+
+def phase_text_files(bin_path: Path) -> bool:
+    header("Phase 5: text and CSV files")
+    tally = Tally("text files")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, (data, subtype, want_bad, want_type) in TEXT_FIXTURES.items():
+            path = Path(tmp) / name
+            path.write_bytes(data)
+            result = run([str(bin_path), str(path)])
+            # The summary line is the one carrying the "bad language" field.
+            first_line = next(
+                (l for l in result.stdout.splitlines() if "bad language:" in l), ""
+            )
+            # A file can carry several types (e.g. "document, document" for a CSV).
+            types = [t.strip().lower() for t in first_line.split(" (", 1)[0].split(",")]
+            subtypes = first_line.split(" (", 1)[1].split(")", 1)[0] if " (" in first_line else ""
+            bad = re.search(r"bad language: (true|false)", first_line)
+            strike3 = re.search(r"strike3: ([^,]*)", first_line)
+
+            problems = []
+            if result.returncode != 0:
+                problems.append(f"exit code {result.returncode}")
+            if want_type not in types:
+                problems.append(f"types {types!r}, expected {want_type!r}")
+            if subtype and subtype not in subtypes:
+                problems.append(f"subtype {subtypes!r} missing {subtype!r}")
+            if want_bad is not None and (bad.group(1) == "true" if bad else None) != want_bad:
+                problems.append(f"bad language expected {want_bad}")
+            if strike3 and strike3.group(1).strip():
+                problems.append(f"strike3 should be empty, got {strike3.group(1).strip()!r}")
+            tally.record(not problems, name, "; ".join(problems) or first_line)
+
+    return tally.summary()
+
+
 def main() -> int:
     results: dict[str, bool] = {}
 
@@ -735,6 +821,7 @@ def main() -> int:
     results["format detection (shifted)"] = phase_format_detection("shifted", bin_path)
     results["YARA fixtures"] = phase_yara_examples(yara_bin_path)
     results["strike3"] = phase_strike3(bin_path)
+    results["text files"] = phase_text_files(bin_path)
     results["server mode"] = phase_server(bin_path)
 
     header("Overall summary")
