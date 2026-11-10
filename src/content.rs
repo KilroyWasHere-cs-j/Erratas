@@ -300,6 +300,12 @@ fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::err
 
     Ok(text)
 }
+
+fn extract_text_from_textfile(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let text = std::str::from_utf8(bytes)?;
+    Ok(text.to_string())
+}
+
 /// Extracts text from the file (OCR for images, direct reading for PDF, DOCX,
 /// XLSX and PPTX) and checks it for bad language and Strike 3 brand names.
 ///
@@ -416,6 +422,27 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
             erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
         }
     }
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::TXT,
+        ))
+    {
+        let text = extract_text_from_textfile(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Textfile extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+            erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
+        }
+    }
+
     erratas_job
 }
 

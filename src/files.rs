@@ -368,6 +368,26 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
+    match looks_like_text(&erratas_job.file_info.contents) {
+        true => {
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(DocumentSubType::TXT));
+        }
+        false => {}
+    }
+    match check_csv(&erratas_job.file_info.contents) {
+        true => {
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(DocumentSubType::CSV));
+        }
+        false => {}
+    }
 
     if erratas_job.file_info.file_type.len() == 0 {
         erratas_job.file_info.file_type.push(RealFileType::Unknown);
@@ -381,6 +401,100 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
             ));
     }
     return erratas_job;
+}
+
+fn looks_like_text(contents: &[u8]) -> bool {
+    // Empty files carry no text, so don't call them text
+    if contents.is_empty() {
+        return false;
+    }
+
+    // Every byte sequence must be valid UTF-8
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return false;
+    };
+
+    // Reject control characters other than tab / newline / carriage return
+    text.chars()
+        .all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+}
+
+/// Detects a CSV file by its content: CSV has no magic bytes, so this checks
+/// that the file is clean text laid out as rows with a consistent column count.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+///
+/// # Returns
+///
+/// `true` if the file is valid UTF-8 text with no binary control characters,
+/// has at least two rows, and every row has the same number of fields (at
+/// least two). Commas inside quoted fields are not counted as separators.
+fn check_csv(contents: &[u8]) -> bool {
+    // Must decode cleanly as UTF-8; binary files like EXEs fail here fast.
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return false;
+    };
+
+    // Excel adds a BOM to the start of UTF-8 CSVs; it isn't part of the data.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+
+    // Control characters (NUL etc.) other than tab/newline/CR mean binary data.
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return false;
+    }
+
+    // Walk the text once, tracking quotes so commas and newlines inside a
+    // quoted field aren't treated as separators. A doubled quote ("") inside
+    // a field toggles twice, which leaves the state correct.
+    let mut in_quotes = false;
+    let mut fields_in_row = 1;
+    let mut row_has_content = false;
+    let mut row_field_counts: Vec<usize> = Vec::new();
+
+    for c in text.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                row_has_content = true;
+            }
+            ',' if !in_quotes => {
+                fields_in_row += 1;
+                row_has_content = true;
+            }
+            // End of a row. Blank lines are skipped.
+            '\n' if !in_quotes => {
+                if row_has_content {
+                    row_field_counts.push(fields_in_row);
+                }
+                fields_in_row = 1;
+                row_has_content = false;
+            }
+            '\r' if !in_quotes => {}
+            _ => row_has_content = true,
+        }
+    }
+
+    // A quote that never closes means this isn't well-formed CSV.
+    if in_quotes {
+        return false;
+    }
+
+    // Last row may not end with a newline.
+    if row_has_content {
+        row_field_counts.push(fields_in_row);
+    }
+
+    // One row isn't enough evidence; a single line of prose with commas would match.
+    let Some(&expected) = row_field_counts.first() else {
+        return false;
+    };
+
+    row_field_counts.len() >= 2 && expected >= 2 && row_field_counts.iter().all(|&n| n == expected)
 }
 
 // Returns the byte offset where the ELF magic was found, so callers (like
