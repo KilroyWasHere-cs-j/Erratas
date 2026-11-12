@@ -422,11 +422,31 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
             erratas_job.file_info.strike3 = match_against_strike3_black_list(&text);
         }
     }
+
     if erratas_job
         .file_info
         .file_sub_type
         .contains(&crate::types::RealFileSubType::Document(
             crate::types::DocumentSubType::TXT,
+        ))
+    {
+        let text = extract_text_from_textfile(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Textfile extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+        }
+    }
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::CSV,
         ))
     {
         let text = extract_text_from_textfile(&erratas_job.file_info.contents)
