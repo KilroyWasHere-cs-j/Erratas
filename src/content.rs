@@ -306,11 +306,17 @@ fn extract_text_from_textfile(bytes: &[u8]) -> Result<String, Box<dyn std::error
     Ok(text.to_string())
 }
 
+/// Added to `errors` when a plain-text file is passed over by `scan_content`.
+const TEXT_NOT_SCANNED_NOTE: &str = "Text file not scanned: plain text is not supported yet";
+
 /// Extracts text from the file (OCR for images, direct reading for PDF, DOCX,
 /// XLSX and PPTX) and checks it for bad language and Strike 3 brand names.
 ///
 /// Must run after `identify_real_filetype`: it picks the extractor from
-/// `file_type` / `file_sub_type`, so with those empty it does nothing.
+/// `file_type` / `file_sub_type`, so with those empty it extracts nothing.
+/// A non-empty, valid UTF-8 file of Unknown (or empty) type is plain text,
+/// which is not scanned; a note is pushed onto `errors` so a clean result
+/// isn't mistaken for a checked one.
 ///
 /// # Arguments
 ///
@@ -460,6 +466,23 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         if let Some(text) = text {
             erratas_job.file_info.bad_language = has_bad_text(&text);
         }
+    }
+
+    // Text that wasn't typed as TXT (e.g. valid UTF-8 with control characters)
+    // still has no extractor, so a clean result would look "checked".
+    // Flag valid UTF-8 files of Unknown/empty type so callers can tell the
+    // difference. Empty files are skipped: there is nothing to scan.
+    let type_unknown = erratas_job
+        .file_info
+        .file_type
+        .iter()
+        .all(|t| *t == RealFileType::Unknown);
+    let contents = &erratas_job.file_info.contents;
+    if type_unknown && !contents.is_empty() && std::str::from_utf8(contents).is_ok() {
+        erratas_job
+            .file_info
+            .errors
+            .push(TEXT_NOT_SCANNED_NOTE.to_string());
     }
 
     erratas_job
@@ -726,6 +749,104 @@ mod tests {
         };
         scan_content(&mut job);
         Some(())
+    }
+
+    // --- plain-text "not scanned" note ------------------------------
+
+    fn text_job(contents: &[u8], file_type: Vec<RealFileType>) -> ErratasJob {
+        ErratasJob {
+            file_info: crate::types::FileInfo {
+                contents: contents.to_vec(),
+                bad_language: false,
+                pii: false,
+                malware: false,
+                strike3: Vec::new(),
+                hashmatches: Vec::new(),
+                yara_finds: Vec::new(),
+                file_type,
+                file_sub_type: Vec::new(),
+                errors: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn plain_text_with_bad_word_is_not_flagged_but_gets_a_note() {
+        let mut job = text_job(b"this is shit and vixen.com", vec![RealFileType::Unknown]);
+        scan_content(&mut job);
+        assert!(!job.file_info.bad_language);
+        assert!(job.file_info.strike3.is_empty());
+        assert_eq!(
+            job.file_info.errors,
+            vec![TEXT_NOT_SCANNED_NOTE.to_string()]
+        );
+    }
+
+    #[test]
+    fn clean_plain_text_also_gets_a_note() {
+        let mut job = text_job(b"hello world", vec![RealFileType::Unknown]);
+        scan_content(&mut job);
+        assert_eq!(
+            job.file_info.errors,
+            vec![TEXT_NOT_SCANNED_NOTE.to_string()]
+        );
+    }
+
+    #[test]
+    fn text_with_no_file_type_yet_gets_a_note() {
+        let mut job = text_job(b"hello world", Vec::new());
+        scan_content(&mut job);
+        assert_eq!(
+            job.file_info.errors,
+            vec![TEXT_NOT_SCANNED_NOTE.to_string()]
+        );
+    }
+
+    #[test]
+    fn non_utf8_unknown_binary_gets_no_note() {
+        let mut job = text_job(&[0xff, 0xfe, 0x00, 0x80], vec![RealFileType::Unknown]);
+        scan_content(&mut job);
+        assert!(job.file_info.errors.is_empty());
+    }
+
+    #[test]
+    fn empty_file_gets_no_note() {
+        let mut job = text_job(b"", vec![RealFileType::Unknown]);
+        scan_content(&mut job);
+        assert!(job.file_info.errors.is_empty());
+    }
+
+    #[test]
+    fn known_non_text_types_get_no_note() {
+        for t in [
+            RealFileType::Archive,
+            RealFileType::Video,
+            RealFileType::Audio,
+            RealFileType::WinExecutable,
+        ] {
+            let mut job = text_job(b"hello world", vec![t]);
+            scan_content(&mut job);
+            assert!(job.file_info.errors.is_empty());
+        }
+    }
+
+    #[test]
+    fn docx_job_does_not_get_the_text_note() {
+        let mut job = text_job(
+            &build_test_docx_bytes("hello"),
+            vec![RealFileType::Document],
+        );
+        job.file_info
+            .file_sub_type
+            .push(crate::types::RealFileSubType::Document(
+                crate::types::DocumentSubType::DOCX,
+            ));
+        scan_content(&mut job);
+        assert!(
+            !job.file_info
+                .errors
+                .contains(&TEXT_NOT_SCANNED_NOTE.to_string())
+        );
     }
 
     #[test]

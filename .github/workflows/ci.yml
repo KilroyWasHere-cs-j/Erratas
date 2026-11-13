@@ -12,11 +12,10 @@ jobs:
   build-and-test:
     # Pinned: ubuntu-latest moved to 26.04, whose leptonica headers make
     # leptonica-sys 0.4.9's bindgen step fail ("unknown type name 'atomic_int'").
+    # 24.04 is the image the last green run used. Don't add
+    # BINDGEN_EXTRA_CLANG_ARGS here: `-include stdatomic.h` made tesseract-sys
+    # fail with duplicate `__off_t` definitions.
     runs-on: ubuntu-24.04
-    env:
-      # Belt and braces for the same error: make sure the C atomics types
-      # are declared when bindgen parses leptonica's headers.
-      BINDGEN_EXTRA_CLANG_ARGS: "-include stdatomic.h"
     steps:
       - uses: actions/checkout@v4
 
