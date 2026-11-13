@@ -300,6 +300,12 @@ fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::err
 
     Ok(text)
 }
+
+fn extract_text_from_textfile(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let text = std::str::from_utf8(bytes)?;
+    Ok(text.to_string())
+}
+
 /// Added to `errors` when a plain-text file is passed over by `scan_content`.
 const TEXT_NOT_SCANNED_NOTE: &str = "Text file not scanned: plain text is not supported yet";
 
@@ -423,7 +429,47 @@ pub fn scan_content(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
     }
 
-    // Plain text has no extractor, so a clean result would look "checked".
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::TXT,
+        ))
+    {
+        let text = extract_text_from_textfile(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Textfile extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+        }
+    }
+    if erratas_job
+        .file_info
+        .file_sub_type
+        .contains(&crate::types::RealFileSubType::Document(
+            crate::types::DocumentSubType::CSV,
+        ))
+    {
+        let text = extract_text_from_textfile(&erratas_job.file_info.contents)
+            .map_err(|e| {
+                erratas_job
+                    .file_info
+                    .errors
+                    .push(format!("Textfile extract fail {e}"))
+            })
+            .ok();
+        if let Some(text) = text {
+            erratas_job.file_info.bad_language = has_bad_text(&text);
+        }
+    }
+
+    // Text that wasn't typed as TXT (e.g. valid UTF-8 with control characters)
+    // still has no extractor, so a clean result would look "checked".
     // Flag valid UTF-8 files of Unknown/empty type so callers can tell the
     // difference. Empty files are skipped: there is nothing to scan.
     let type_unknown = erratas_job
@@ -812,6 +858,58 @@ mod tests {
         assert!(
             scan_fixture("resources/ocr_examples/clean_text.png").is_some(),
             "scan_content should run OCR + the profanity check on a real image without erroring"
+        );
+    }
+
+    // --- issue #48: text/CSV content scanning ---------------------------
+    // Standard: text is typed and checked for bad language, but NOT for
+    // Strike 3 names. Goes through identify_real_filetype + scan_content,
+    // the same order lib.rs runs them. The bad-language test is expected
+    // to FAIL until #48 is implemented.
+
+    fn scan_text_bytes(bytes: &[u8]) -> ErratasJob {
+        let mut job = ErratasJob {
+            file_info: crate::types::FileInfo {
+                contents: bytes.to_vec(),
+                bad_language: false,
+                pii: false,
+                malware: false,
+                strike3: Vec::new(),
+                hashmatches: Vec::new(),
+                yara_finds: Vec::new(),
+                file_type: Vec::new(),
+                file_sub_type: Vec::new(),
+                errors: Vec::new(),
+            },
+        };
+        crate::files::identify_real_filetype(&mut job);
+        scan_content(&mut job);
+        job
+    }
+
+    #[test]
+    fn issue_48_profane_text_file_is_flagged_for_bad_language() {
+        let job = scan_text_bytes(b"this is a shit example of profane text\nsecond line\n");
+        assert!(
+            job.file_info.bad_language,
+            "profanity in a text file should set bad_language"
+        );
+    }
+
+    #[test]
+    fn issue_48_clean_text_file_is_not_flagged_and_has_no_errors() {
+        let job = scan_text_bytes(b"a perfectly polite sentence\nand another one\n");
+        assert!(!job.file_info.bad_language);
+        assert!(job.file_info.errors.is_empty());
+    }
+
+    #[test]
+    fn issue_48_text_file_is_not_scanned_for_strike3() {
+        let job = scan_text_bytes(b"visit vixen.com and tushy.com\nmore text here\n");
+        assert!(
+            job.file_info.strike3.is_empty(),
+            "text files are exempt from the strike3 scan, got {:?}",
+            job.file_info.strike3
         );
     }
 }

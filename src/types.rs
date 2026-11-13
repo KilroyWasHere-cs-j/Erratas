@@ -88,6 +88,8 @@ pub enum DocumentSubType {
     OOXML,
     OLECFB,
     CHM,
+    TXT,
+    CSV,
 }
 
 /// All Erratas recognized archive file subtypes

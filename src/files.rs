@@ -368,6 +368,26 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         _ => {}
     }
+    match looks_like_text(&erratas_job.file_info.contents) {
+        true => {
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(DocumentSubType::TXT));
+        }
+        false => {}
+    }
+    match check_csv(&erratas_job.file_info.contents) {
+        true => {
+            erratas_job.file_info.file_type.push(RealFileType::Document);
+            erratas_job
+                .file_info
+                .file_sub_type
+                .push(RealFileSubType::Document(DocumentSubType::CSV));
+        }
+        false => {}
+    }
 
     if erratas_job.file_info.file_type.len() == 0 {
         erratas_job.file_info.file_type.push(RealFileType::Unknown);
@@ -381,6 +401,100 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
             ));
     }
     return erratas_job;
+}
+
+fn looks_like_text(contents: &[u8]) -> bool {
+    // Empty files carry no text, so don't call them text
+    if contents.is_empty() {
+        return false;
+    }
+
+    // Every byte sequence must be valid UTF-8
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return false;
+    };
+
+    // Reject control characters other than tab / newline / carriage return
+    text.chars()
+        .all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+}
+
+/// Detects a CSV file by its content: CSV has no magic bytes, so this checks
+/// that the file is clean text laid out as rows with a consistent column count.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+///
+/// # Returns
+///
+/// `true` if the file is valid UTF-8 text with no binary control characters,
+/// has at least two rows, and every row has the same number of fields (at
+/// least two). Commas inside quoted fields are not counted as separators.
+fn check_csv(contents: &[u8]) -> bool {
+    // Must decode cleanly as UTF-8; binary files like EXEs fail here fast.
+    let Ok(text) = std::str::from_utf8(contents) else {
+        return false;
+    };
+
+    // Excel adds a BOM to the start of UTF-8 CSVs; it isn't part of the data.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+
+    // Control characters (NUL etc.) other than tab/newline/CR mean binary data.
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return false;
+    }
+
+    // Walk the text once, tracking quotes so commas and newlines inside a
+    // quoted field aren't treated as separators. A doubled quote ("") inside
+    // a field toggles twice, which leaves the state correct.
+    let mut in_quotes = false;
+    let mut fields_in_row = 1;
+    let mut row_has_content = false;
+    let mut row_field_counts: Vec<usize> = Vec::new();
+
+    for c in text.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+                row_has_content = true;
+            }
+            ',' if !in_quotes => {
+                fields_in_row += 1;
+                row_has_content = true;
+            }
+            // End of a row. Blank lines are skipped.
+            '\n' if !in_quotes => {
+                if row_has_content {
+                    row_field_counts.push(fields_in_row);
+                }
+                fields_in_row = 1;
+                row_has_content = false;
+            }
+            '\r' if !in_quotes => {}
+            _ => row_has_content = true,
+        }
+    }
+
+    // A quote that never closes means this isn't well-formed CSV.
+    if in_quotes {
+        return false;
+    }
+
+    // Last row may not end with a newline.
+    if row_has_content {
+        row_field_counts.push(fields_in_row);
+    }
+
+    // One row isn't enough evidence; a single line of prose with commas would match.
+    let Some(&expected) = row_field_counts.first() else {
+        return false;
+    };
+
+    row_field_counts.len() >= 2 && expected >= 2 && row_field_counts.iter().all(|&n| n == expected)
 }
 
 // Returns the byte offset where the ELF magic was found, so callers (like
@@ -2772,5 +2886,111 @@ mod tests {
             check_dmg(&contents, &matches_for(&contents)),
             RealFileType::Archive
         );
+    }
+
+    // --- check_csv ----------------------------------------------------
+
+    #[test]
+    fn check_csv_accepts_a_simple_csv() {
+        assert!(check_csv(b"name,age\nbob,30\nann,25\n"));
+    }
+
+    #[test]
+    fn check_csv_accepts_quoted_commas_and_crlf() {
+        assert!(check_csv(b"name,note\r\nbob,\"a, b\"\r\nann,\"x\"\"y\"\r\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_uneven_columns() {
+        assert!(!check_csv(b"a,b,c\n1,2\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_prose_and_single_column() {
+        assert!(!check_csv(b"hello, world, this is one line"));
+        assert!(!check_csv(b"one\ntwo\nthree\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_binary_and_empty() {
+        assert!(!check_csv(b"MZ\x90\x00\x03,\x00\x00\nx,y\n"));
+        assert!(!check_csv(&[0xff, 0xfe, 0x00, 0x01]));
+        assert!(!check_csv(b""));
+    }
+
+    // --- check_csv edge cases ----------------------------------------
+
+    #[test]
+    fn check_csv_ignores_a_leading_bom_and_missing_trailing_newline() {
+        assert!(check_csv(b"\xEF\xBB\xBFa,b\n1,2"));
+    }
+
+    #[test]
+    fn check_csv_skips_blank_lines() {
+        assert!(check_csv(b"a,b\n\n1,2\n\n3,4\n"));
+    }
+
+    #[test]
+    fn check_csv_accepts_a_newline_inside_a_quoted_field() {
+        assert!(check_csv(b"a,b\n\"line1\nline2\",2\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_an_unclosed_quote() {
+        assert!(!check_csv(b"a,b\n\"1,2\n3,4\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_a_single_row() {
+        assert!(!check_csv(b"a,b,c\n"));
+    }
+
+    #[test]
+    fn check_csv_rejects_control_bytes_in_otherwise_valid_rows() {
+        assert!(!check_csv(b"a,b\n1,\x002\n"));
+    }
+
+    // --- issue #48: text/CSV must be typed, not left as Unknown -------
+    // These go through identify_real_filetype (the real entry point),
+    // not check_csv directly. Detection isn't wired in yet, so the
+    // "is typed" tests are expected to FAIL until #48 is implemented.
+
+    #[test]
+    fn issue_48_plain_text_is_not_typed_unknown() {
+        let mut result = result_for(b"Just a plain sentence of text.\nAnd a second line.\n".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(
+            !result.file_info.file_type.contains(&RealFileType::Unknown),
+            "plain text should get a real type, got {:?}",
+            result.file_info.file_type
+        );
+    }
+
+    #[test]
+    fn issue_48_csv_is_not_typed_unknown() {
+        let mut result = result_for(b"name,age\nbob,30\nann,25\n".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(
+            !result.file_info.file_type.contains(&RealFileType::Unknown),
+            "a CSV should get a real type, got {:?}",
+            result.file_info.file_type
+        );
+    }
+
+    #[test]
+    fn issue_48_binary_blob_is_not_typed_as_text() {
+        // NUL bytes + invalid UTF-8: must not be mistaken for text. Today
+        // this is Unknown; once a Text type exists it must stay out of it.
+        let mut result = result_for(vec![0x00, 0x01, 0x02, 0xFF, 0xFE, 0x00, 0x00, 0x80]);
+        identify_real_filetype(&mut result);
+        assert_eq!(result.file_info.file_type, vec![RealFileType::Unknown]);
+    }
+
+    #[test]
+    fn issue_48_text_with_a_pdf_header_stays_a_document() {
+        // The text check must not steal files a magic-byte check already claims.
+        let mut result = result_for(b"%PDF-1.4\nthis is all valid text\n".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(result.file_info.file_type.contains(&RealFileType::Document));
     }
 }

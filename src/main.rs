@@ -1,3 +1,4 @@
+// The entirety of this program was written whilst listening to metal music
 use std::env;
 use std::fs;
 use std::process;
