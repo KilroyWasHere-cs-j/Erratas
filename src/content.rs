@@ -283,8 +283,10 @@ fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::err
     // Collect slide file names first so we can sort them (slide1, slide2, ... not zip order).
     let mut slide_names: Vec<String> = archive
         .file_names()
+        // zip 9 yields a Result per name; skip entries whose name can't be decoded
+        .filter_map(Result::ok)
         .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
-        .map(String::from)
+        .map(|n| n.into_owned())
         .collect();
     slide_names.sort_by_key(|n| {
         n.trim_start_matches("ppt/slides/slide")
