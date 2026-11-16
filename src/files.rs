@@ -404,20 +404,106 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
 }
 
 fn looks_like_text(contents: &[u8]) -> bool {
+    // Decodes UTF-8, BOM-marked UTF-16/32, or Windows-1252, and already
+    // rejects empty files and binary control characters.
+    decode_text(contents).is_some()
+}
+
+/// Decodes a file's bytes as text, trying the encodings Erratas supports.
+///
+/// Order matters: a UTF-32 LE BOM (`FF FE 00 00`) starts with the UTF-16 LE
+/// BOM, so UTF-32 is checked first. UTF-8 comes before the legacy fallback
+/// because valid UTF-8 is almost never accidental.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+///
+/// # Returns
+///
+/// The decoded text (BOM removed), or `None` if the file is empty, undecodable,
+/// or contains control characters other than tab / newline / carriage return
+/// (which means binary data).
+pub(crate) fn decode_text(contents: &[u8]) -> Option<String> {
     // Empty files carry no text, so don't call them text
     if contents.is_empty() {
-        return false;
+        return None;
     }
 
-    // Every byte sequence must be valid UTF-8
-    let Ok(text) = std::str::from_utf8(contents) else {
-        return false;
+    let text: String = if let Some(t) = decode_utf32_bom(contents) {
+        t?
+    } else if contents.starts_with(&[0xFF, 0xFE]) {
+        encoding_rs::UTF_16LE
+            .decode_without_bom_handling_and_without_replacement(&contents[2..])?
+            .into_owned()
+    } else if contents.starts_with(&[0xFE, 0xFF]) {
+        encoding_rs::UTF_16BE
+            .decode_without_bom_handling_and_without_replacement(&contents[2..])?
+            .into_owned()
+    } else if let Ok(t) = std::str::from_utf8(contents) {
+        t.to_string()
+    } else {
+        // Legacy fallback. NUL means binary (or BOM-less UTF-16), and these
+        // bytes are undefined in Windows-1252, so a file with them isn't
+        // really Windows-1252 text.
+        if contents
+            .iter()
+            .any(|b| matches!(b, 0x00 | 0x81 | 0x8D | 0x8F | 0x90 | 0x9D))
+        {
+            return None;
+        }
+        let (t, _) = encoding_rs::WINDOWS_1252.decode_without_bom_handling(contents);
+        t.into_owned()
     };
 
     // Reject control characters other than tab / newline / carriage return
-    text.chars()
+    if text
+        .chars()
         .all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r'))
+    {
+        Some(text)
+    } else {
+        None
+    }
 }
+
+/// Decodes UTF-32 when the file starts with a UTF-32 BOM.
+///
+/// # Returns
+///
+/// `None` if there is no UTF-32 BOM (try other encodings), `Some(None)` if
+/// there is one but the data is invalid (length not a multiple of 4, or an
+/// invalid code point), `Some(Some(text))` on success.
+fn decode_utf32_bom(contents: &[u8]) -> Option<Option<String>> {
+    let little_endian = if contents.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
+        true
+    } else if contents.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+        false
+    } else {
+        return None;
+    };
+
+    let body = &contents[4..];
+    if body.len() % 4 != 0 {
+        return Some(None);
+    }
+
+    let mut text = String::with_capacity(body.len() / 4);
+    for chunk in body.chunks_exact(4) {
+        let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        let code = if little_endian {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        };
+        match char::from_u32(code) {
+            Some(c) => text.push(c),
+            None => return Some(None),
+        }
+    }
+    Some(Some(text))
+}
+
 
 /// Detects a CSV file by its content: CSV has no magic bytes, so this checks
 /// that the file is clean text laid out as rows with a consistent column count.
@@ -432,10 +518,11 @@ fn looks_like_text(contents: &[u8]) -> bool {
 /// has at least two rows, and every row has the same number of fields (at
 /// least two). Commas inside quoted fields are not counted as separators.
 fn check_csv(contents: &[u8]) -> bool {
-    // Must decode cleanly as UTF-8; binary files like EXEs fail here fast.
-    let Ok(text) = std::str::from_utf8(contents) else {
+    // Must decode cleanly (UTF-8/16/32 or Windows-1252); binary files like EXEs fail here fast.
+    let Some(text) = decode_text(contents) else {
         return false;
     };
+    let text = text.as_str();
 
     // Excel adds a BOM to the start of UTF-8 CSVs; it isn't part of the data.
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
@@ -2992,5 +3079,76 @@ mod tests {
         let mut result = result_for(b"%PDF-1.4\nthis is all valid text\n".to_vec());
         identify_real_filetype(&mut result);
         assert!(result.file_info.file_type.contains(&RealFileType::Document));
+    }
+
+    // --- issue 56: non-UTF-8 text -------------------------------------
+
+    fn utf16(s: &str, le: bool) -> Vec<u8> {
+        let mut out = if le { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+        for u in s.encode_utf16() {
+            out.extend(if le { u.to_le_bytes() } else { u.to_be_bytes() });
+        }
+        out
+    }
+
+    fn utf32(s: &str, le: bool) -> Vec<u8> {
+        let mut out = if le {
+            vec![0xFF, 0xFE, 0, 0]
+        } else {
+            vec![0, 0, 0xFE, 0xFF]
+        };
+        for c in s.chars() {
+            out.extend(if le {
+                (c as u32).to_le_bytes()
+            } else {
+                (c as u32).to_be_bytes()
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn issue_56_utf16_and_utf32_text_are_decoded() {
+        for le in [true, false] {
+            assert_eq!(decode_text(&utf16("héllo\nworld", le)).unwrap(), "héllo\nworld");
+            assert_eq!(decode_text(&utf32("héllo 😀", le)).unwrap(), "héllo 😀");
+        }
+    }
+
+    #[test]
+    fn issue_56_windows_1252_text_is_decoded() {
+        // 0xE9 = é, 0x93/0x94 = curly quotes; none are valid UTF-8 here
+        assert_eq!(decode_text(b"caf\xe9 \x93hi\x94").unwrap(), "café \u{201c}hi\u{201d}");
+    }
+
+    #[test]
+    fn issue_56_non_utf8_text_gets_a_real_type() {
+        for data in [utf16("hello there\n", true), utf32("hello there\n", false), b"caf\xe9\n".to_vec()] {
+            let mut result = result_for(data);
+            identify_real_filetype(&mut result);
+            assert!(
+                result.file_info.file_sub_type.contains(&RealFileSubType::Document(DocumentSubType::TXT)),
+                "got {:?}",
+                result.file_info.file_type
+            );
+        }
+    }
+
+    #[test]
+    fn issue_56_non_utf8_csv_is_detected() {
+        assert!(check_csv(&utf16("a,b\n1,2\n", true)));
+        assert!(check_csv(&utf32("a,b\n1,2\n", false)));
+        assert!(check_csv(b"name,city\nren\xe9,paris\nann,rome\n"));
+    }
+
+    #[test]
+    fn issue_56_binary_is_still_not_text() {
+        // NULs without a BOM, undefined 1252 bytes, bad UTF-32 length, high-byte noise
+        assert!(decode_text(&[0x41, 0x00, 0x42, 0x00]).is_none());
+        assert!(decode_text(&[0x81, 0x41]).is_none());
+        assert!(decode_text(&[0xFF, 0xFE, 0, 0, 0x41, 0, 0]).is_none());
+        assert!(decode_text(&[0xFF, 0xFE, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]).is_none());
+        assert!(decode_text(&[0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00]).is_none());
+        assert!(decode_text(b"").is_none());
     }
 }
