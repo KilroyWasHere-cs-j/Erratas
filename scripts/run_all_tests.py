@@ -724,6 +724,9 @@ TEXT_FIXTURES: dict[str, tuple[bytes, str | None, bool | None, str]] = {
     # Text is exempt from the Strike 3 scan, so this must stay unflagged.
     # (The names also trip the profanity filter, so bad language is not asserted.)
     "strike3_names.txt": (b"visit vixen.com and tushy.com\nmore text here\n", "TXT", None, "document"),
+    # HTML is typed by its opening tag; malicious pages are checked below.
+    "page.html": (b"<!DOCTYPE html><html><body><p>Hello there.</p></body></html>\n", "HTML", False, "document"),
+    "hidden_iframe.html": (b'<html><body><iframe src="https://x.test/" width="0" height="0"></iframe></body></html>\n', "HTML", None, "document"),
     # A file a magic-byte check already claims must keep that type.
     "pdf_header.txt": (b"%PDF-1.4\nthis is all valid text\n", "PDF", False, "document"),
     # NUL bytes + invalid UTF-8: must never be called text.
@@ -763,6 +766,13 @@ def phase_text_files(bin_path: Path) -> bool:
             if strike3 and strike3.group(1).strip():
                 problems.append(f"strike3 should be empty, got {strike3.group(1).strip()!r}")
             tally.record(not problems, name, "; ".join(problems) or first_line)
+
+        # HTML scan: a hidden iframe must set the malware flag, a clean page must not.
+        for name, want_malware in (("hidden_iframe.html", "true"), ("page.html", "false")):
+            result = run([str(bin_path), str(Path(tmp) / name)])
+            m = re.search(r"malware: (true|false)", result.stdout)
+            got = m.group(1) if m else None
+            tally.record(got == want_malware, f"{name} malware flag", f"malware={got}, expected {want_malware}")
 
     return tally.summary()
 
