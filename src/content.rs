@@ -302,8 +302,8 @@ fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::err
 }
 
 fn extract_text_from_textfile(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    let text = std::str::from_utf8(bytes)?;
-    Ok(text.to_string())
+    // Handles UTF-8, BOM-marked UTF-16/32 and Windows-1252 text
+    crate::files::decode_text(bytes).ok_or_else(|| "undecodable text".into())
 }
 
 /// Added to `errors` when a plain-text file is passed over by `scan_content`.
