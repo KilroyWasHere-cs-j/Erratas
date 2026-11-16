@@ -1239,6 +1239,7 @@ dependencies = [
  "aho-corasick",
  "calamine",
  "docx-rs",
+ "encoding_rs",
  "image",
  "imageproc",
  "lazy_static",

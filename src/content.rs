@@ -42,23 +42,42 @@ pub fn _pii() {}
 /// Looks for any name on the Strike 3 brand list (`STRIKE3_IP`) in the text,
 /// ignoring case.
 ///
+/// Entries containing a `.` (domains) match as substrings, so `www.vixen.com`
+/// still hits. Other entries (multi-word names) must match as whole words, so
+/// they don't fire inside longer words.
+///
 /// # Arguments
 ///
 /// * `text` - Text extracted from a file.
 ///
 /// # Returns
 ///
-/// One entry per brand found, but each entry is the whole input text, not the
-/// brand that matched. An empty list means no brand was found.
+/// The list entries that were found, once each, in list order. An empty list
+/// means no brand was found.
 fn match_against_strike3_black_list(text: &str) -> Vec<String> {
     let lowercase_text = text.to_lowercase();
     let mut found = Vec::new();
     for i in STRIKE3_IP {
-        if lowercase_text.contains(i) {
-            found.push(text.to_string());
+        let hit = if i.contains('.') {
+            lowercase_text.contains(i)
+        } else {
+            contains_whole_word(&lowercase_text, i)
+        };
+        if hit {
+            found.push(i.to_string());
         }
     }
-    return found;
+    found
+}
+
+/// Checks whether `needle` appears in `haystack` with no letter or digit
+/// directly before or after it.
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(start, m)| {
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[start + m.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Turns an image into pure black and white so OCR reads it more reliably.
@@ -302,8 +321,8 @@ fn extract_text_from_powerpoint(bytes: &[u8]) -> Result<String, Box<dyn std::err
 }
 
 fn extract_text_from_textfile(bytes: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
-    let text = std::str::from_utf8(bytes)?;
-    Ok(text.to_string())
+    // Handles UTF-8, BOM-marked UTF-16/32 and Windows-1252 text
+    crate::files::decode_text(bytes).ok_or_else(|| "undecodable text".into())
 }
 
 /// Added to `errors` when a plain-text file is passed over by `scan_content`.
@@ -910,6 +929,36 @@ mod tests {
             job.file_info.strike3.is_empty(),
             "text files are exempt from the strike3 scan, got {:?}",
             job.file_info.strike3
+        );
+    }
+
+    // --- issues 49 / 50: strike3 matching -----------------------------
+
+    #[test]
+    fn issue_50_ordinary_words_are_not_flagged() {
+        for t in [
+            "We need to look deeper into the quarterly numbers",
+            "She slayed the presentation",
+            "The wifey joke and a blacked out window",
+        ] {
+            assert!(match_against_strike3_black_list(t).is_empty(), "{t}");
+        }
+    }
+
+    #[test]
+    fn issue_50_domains_and_phrases_are_flagged() {
+        assert_eq!(match_against_strike3_black_list("See WWW.Blacked.com now"), vec!["blacked.com"]);
+        assert_eq!(match_against_strike3_black_list("a Vixen Plus trial."), vec!["vixen plus"]);
+        // phrase inside a longer word is not a hit
+        assert!(match_against_strike3_black_list("unblacked rawness").is_empty());
+    }
+
+    #[test]
+    fn issue_49_result_holds_terms_not_the_whole_text() {
+        let text = "visit tushy.com and vixen.com, then tushy.com again";
+        assert_eq!(
+            match_against_strike3_black_list(text),
+            vec!["vixen.com", "tushy.com"]
         );
     }
 }

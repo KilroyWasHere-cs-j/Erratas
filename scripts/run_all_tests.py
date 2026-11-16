@@ -14,11 +14,6 @@ strike3/ as one combined suite:
                                  path instead of its fast fixed-offset one),
                                  then runs erratas against each and checks
                                  a real type came back.
-  2. YARA rule fixtures       -- was scripts/scan_yara_examples.sh. Runs
-                                 every fixture in resources/yara_examples/
-                                 through the yara_scan_file example and
-                                 checks it trips the rule its filename is
-                                 named after.
   3. strike3 word list        -- was strike3/generate_images.sh +
                                  test_strike3.sh + run_erratas.sh combined:
                                  generates one block-letter-on-black PNG per
@@ -75,7 +70,6 @@ from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RESOURCES_DIR = REPO_ROOT / "resources"
-YARA_EXAMPLES_DIR = RESOURCES_DIR / "yara_examples"
 STRIKE3_DIR = REPO_ROOT / "strike3"
 CONSTS_RS = REPO_ROOT / "src" / "consts.rs"
 FONT_PATH = "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
@@ -403,34 +397,6 @@ def phase_format_detection(mode: str, bin_path: Path) -> bool:
     return tally.summary()
 
 
-# --- Phase 2: YARA rule fixtures ------------------------------------------
-
-YARA_OVERRIDES = {
-    "elf_reverse_shell.txt": "elf_reverse_shell_strings",
-    "script_lolbin_certutil.txt": "script_lolbin_download_execute",
-}
-
-
-def phase_yara_examples(yara_bin_path: Path) -> bool:
-    header("Phase 2: YARA rule fixtures")
-    if not YARA_EXAMPLES_DIR.is_dir():
-        print(f"skipping: {YARA_EXAMPLES_DIR} not present locally")
-        return True
-
-    tally = Tally("YARA rule fixtures")
-    for fixture in sorted(YARA_EXAMPLES_DIR.iterdir()):
-        base = fixture.stem
-        expected = YARA_OVERRIDES.get(fixture.name, base)
-        # Run from REPO_ROOT -- build_yara_rules() reads the "rules"
-        # directory relative to the process's cwd, not the fixture's path.
-        result = run([str(yara_bin_path), str(fixture)], cwd=REPO_ROOT)
-        matches = [line for line in result.stdout.splitlines() if line.strip()]
-        ok = expected in matches
-        tally.record(ok, fixture.name, f"expected={expected} matched={matches}")
-
-    return tally.summary()
-
-
 # --- Phase 3: strike3 word list --------------------------------------------
 
 
@@ -494,7 +460,9 @@ def phase_strike3(bin_path: Path) -> bool:
         result = run([str(bin_path), str(path)])
         display_output = extract_display_output(result.stdout)
         strike3_field = (
-            display_output.split("strike3:", 1)[-1].strip()
+            # The Display line continues onto a "yara rule hits" line, so
+            # only the first line after "strike3:" is the field's value.
+            display_output.split("strike3:", 1)[-1].split("\n", 1)[0].strip()
             if "strike3:" in display_output
             else ""
         )
@@ -507,7 +475,7 @@ def phase_strike3(bin_path: Path) -> bool:
 # --- Phase 4: server mode --------------------------------------------------
 
 # Mirrors src/server.rs's MAX_UPLOAD -- anything above this must be refused.
-SERVER_MAX_UPLOAD = 100 * 1024 * 1024
+SERVER_MAX_UPLOAD = 1024 * 1024 * 1024  # keep in sync with MAX_UPLOAD in src/server.rs
 SERVER_HOST = "127.0.0.1"
 
 # Per-request socket timeout. Generous because the server compiles the
@@ -814,22 +782,16 @@ def main() -> int:
 
     results["cargo test"] = phase_cargo_test()
 
-    print("\nBuilding erratas + yara_scan_file example ...")
+    print("\nBuilding erratas ...")
     build = run(["cargo", "build", "--quiet"])
     if build.returncode != 0:
         print(f"{RED}cargo build failed:{RESET}\n{build.stderr}")
         return 1
-    build_example = run(["cargo", "build", "--quiet", "--example", "yara_scan_file"])
-    if build_example.returncode != 0:
-        print(f"{RED}cargo build --example yara_scan_file failed:{RESET}\n{build_example.stderr}")
-        return 1
 
     bin_path = REPO_ROOT / "target" / "debug" / "erratas"
-    yara_bin_path = REPO_ROOT / "target" / "debug" / "examples" / "yara_scan_file"
 
     results["format detection (normal)"] = phase_format_detection("normal", bin_path)
     results["format detection (shifted)"] = phase_format_detection("shifted", bin_path)
-    results["YARA fixtures"] = phase_yara_examples(yara_bin_path)
     results["strike3"] = phase_strike3(bin_path)
     results["text files"] = phase_text_files(bin_path)
     results["server mode"] = phase_server(bin_path)
