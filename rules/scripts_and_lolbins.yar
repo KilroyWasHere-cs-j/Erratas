@@ -58,3 +58,22 @@ rule script_curl_pipe_shell
     condition:
         $a
 }
+
+// Any shell script, spotted by its shebang line on the very first bytes.
+// Severity is "low" so a hit is recorded but does not set the malware flag
+// (only medium and above do) -- most shell scripts are harmless.
+rule script_shell_shebang
+{
+    meta:
+        description = "Shell script (starts with a #! line for sh/bash/zsh/dash)"
+        severity    = "low"
+        target      = "generic - any file type"
+
+    strings:
+        // "#!/bin/bash", "#!/usr/bin/env bash", "#! /bin/sh", etc.
+        $shebang = /#![ \t]*\/(usr\/)?bin\/(env[ \t]+)?(ba|z|da)?sh/
+
+    condition:
+        // Only count it when the shebang is the first thing in the file.
+        $shebang at 0
+}
