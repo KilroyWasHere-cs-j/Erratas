@@ -13,6 +13,7 @@ the file types Erratas already classifies (`src/types.rs`'s
 | `pdf_documents.yar`            | PDF                                           |
 | `scripts_and_lolbins.yar`      | Generic script/dropper indicators (any file)  |
 | `archives_and_installers.yar`  | ZIP/RAR/7z/TAR, MSI installers, LNK shortcuts |
+| `html_documents.yar`           | HTML: obfuscated JS, meta refresh (#7)        |
 | `shellcode.yar`                | Embedded shellcode payloads (any file, #5)    |
 .
 
