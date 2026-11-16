@@ -3,24 +3,23 @@
 // contains these strings isn't flagged. Plain <script> tags, event handlers
 // and iframes are checked by the parser in malware.rs (html_scan) instead.
 
-// eval() of a decoded string is the classic way to hide a JavaScript payload.
+// eval() applied directly to a decoder call is the classic way to hide a
+// JavaScript payload. eval, atob etc. merely appearing in the same file (as
+// in bundled or minified code) is not enough, so the call must be nested.
 rule html_obfuscated_javascript
 {
     meta:
-        description = "eval() combined with a string decoder (atob/unescape/fromCharCode)"
+        description = "eval(atob(...)), eval(unescape(...)) or eval(String.fromCharCode(...))"
         severity    = "high"
         target      = "Document/HTML"
 
     strings:
         $d1 = "<!doctype html" nocase
         $d2 = "<html" nocase
-        $eval = "eval(" nocase
-        $atob = "atob(" nocase
-        $unescape = "unescape(" nocase
-        $charcode = "fromCharCode" nocase
+        $nested = /eval\s*\(\s*(atob|unescape|String\.fromCharCode)\s*\(/ nocase
 
     condition:
-        any of ($d*) in (0..1024) and $eval and any of ($atob, $unescape, $charcode)
+        any of ($d*) in (0..1024) and $nested
 }
 
 // document.write(unescape("%3Cscript...")) writes hidden markup at load time.
