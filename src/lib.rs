@@ -10,7 +10,7 @@ use std::{error::Error, io};
 use crate::{
     content::scan_content,
     files::identify_real_filetype,
-    malware::yara_scan,
+    malware::{html_scan, yara_scan},
     types::{ErratasJob, FileInfo},
 };
 
@@ -44,6 +44,7 @@ pub fn scan_path(path: &str) -> Result<ErratasJob, Box<dyn Error>> {
             println!("Beginning scanning");
             identify_real_filetype(&mut erratas_job);
             yara_scan(&mut erratas_job);
+            html_scan(&mut erratas_job);
             scan_content(&mut erratas_job);
             Ok(erratas_job)
         }
@@ -73,6 +74,7 @@ pub fn scan_bytes(bytes: &[u8]) -> Result<ErratasJob, Box<dyn Error>> {
             println!("Beginning scanning");
             identify_real_filetype(&mut erratas_job);
             yara_scan(&mut erratas_job);
+            html_scan(&mut erratas_job);
             scan_content(&mut erratas_job);
             Ok(erratas_job)
         }

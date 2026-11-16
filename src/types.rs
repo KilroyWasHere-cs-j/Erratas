@@ -90,6 +90,7 @@ pub enum DocumentSubType {
     CHM,
     TXT,
     CSV,
+    HTML,
 }
 
 /// All Erratas recognized archive file subtypes

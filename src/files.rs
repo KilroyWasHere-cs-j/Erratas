@@ -378,6 +378,13 @@ pub fn identify_real_filetype(erratas_job: &mut ErratasJob) -> &mut ErratasJob {
         }
         false => {}
     }
+    if check_html(&erratas_job.file_info.contents) {
+        erratas_job.file_info.file_type.push(RealFileType::Document);
+        erratas_job
+            .file_info
+            .file_sub_type
+            .push(RealFileSubType::Document(DocumentSubType::HTML));
+    }
     match check_csv(&erratas_job.file_info.contents) {
         true => {
             erratas_job.file_info.file_type.push(RealFileType::Document);
@@ -466,6 +473,37 @@ pub(crate) fn decode_text(contents: &[u8]) -> Option<String> {
         None
     }
 }
+
+/// Detects an HTML file by its opening tag: HTML has no magic bytes, so this
+/// looks for `<!DOCTYPE html` or `<html` at the start of the file.
+///
+/// # Arguments
+///
+/// * `contents` - The whole file.
+///
+/// # Returns
+///
+/// `true` if, after an optional UTF-8 BOM and leading whitespace, the file
+/// starts with either tag (any case) and the opening 1 KB is clean text. The
+/// text check stops binary files that merely mention `<html` from matching.
+fn check_html(contents: &[u8]) -> bool {
+    // Only the start matters; no need to read a whole large file as text.
+    let head = &contents[..contents.len().min(1024)];
+    let head = head.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(head);
+
+    // A cut at 1 KB can split a multi-byte character, so decode leniently.
+    let text = String::from_utf8_lossy(head);
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+    {
+        return false;
+    }
+
+    let start = text.trim_start().to_ascii_lowercase();
+    start.starts_with("<!doctype html") || start.starts_with("<html")
+}
+
 
 /// Decodes UTF-32 when the file starts with a UTF-32 BOM.
 ///
@@ -3079,6 +3117,35 @@ mod tests {
         let mut result = result_for(b"%PDF-1.4\nthis is all valid text\n".to_vec());
         identify_real_filetype(&mut result);
         assert!(result.file_info.file_type.contains(&RealFileType::Document));
+    }
+
+    // --- check_html (#7) -------------------------------------------------
+
+    #[test]
+    fn check_html_accepts_doctype_and_html_tag_in_any_case() {
+        assert!(check_html(b"<!DOCTYPE html>\n<html></html>"));
+        assert!(check_html(b"  \n<HTML lang=en><body></body></HTML>"));
+        assert!(check_html(b"\xEF\xBB\xBF<!doctype HTML><p>hi"));
+    }
+
+    #[test]
+    fn check_html_rejects_prose_binaries_and_empty() {
+        assert!(!check_html(b"Some text that mentions <html> later"));
+        assert!(!check_html(b"MZ\x90\x00<html>"));
+        assert!(!check_html(b"<!DOCTYPE html\x00\x01>"));
+        assert!(!check_html(b""));
+    }
+
+    #[test]
+    fn check_html_types_the_file_as_a_html_document() {
+        let mut result = result_for(b"<!DOCTYPE html><html><body>hi</body></html>".to_vec());
+        identify_real_filetype(&mut result);
+        assert!(
+            result
+                .file_info
+                .file_sub_type
+                .contains(&RealFileSubType::Document(DocumentSubType::HTML))
+        );
     }
 
     // --- issue 56: non-UTF-8 text -------------------------------------
