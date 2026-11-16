@@ -12,6 +12,6 @@ pub static STRIKE3_IP: &[&str] = &[
     "tushy raw",
     "deeper.com",
     "slayed.com",
-    "mlfy.com",
+    "milfy.com",
     "wifey.com",
 ];
